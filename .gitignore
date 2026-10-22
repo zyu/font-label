@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+web/dist/
+server/bin/
+
+# 运行数据（不进仓库）
+storage/
+backups/
+.run/
+*.log
+
+# 密钥：deploy/.env 只留 .env.example
+#deploy/.env
+
+# 系统垃圾
+.DS_Store

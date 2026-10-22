@@ -1,0 +1,59 @@
+name: font-label
+
+services:
+  pg:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: fontlabel
+      POSTGRES_USER: fontlabel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      TZ: Asia/Shanghai
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fontlabel -d fontlabel"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../server
+    environment:
+      HTTP_ADDR: ":18090"
+      DATABASE_URL: postgres://fontlabel:${POSTGRES_PASSWORD}@pg:5432/fontlabel?sslmode=disable
+      STORAGE_ROOT: /data/storage
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/.env}
+      MEDIA_SIGN_SECRET: ${MEDIA_SIGN_SECRET:?set MEDIA_SIGN_SECRET in deploy/.env}
+      ADMIN_INIT_PASSWORD: ${ADMIN_INIT_PASSWORD:?set ADMIN_INIT_PASSWORD in deploy/.env}
+      ACCESS_TTL_HOURS: "12"
+      MEDIA_SIGN_TTL_MIN: "60"
+      MAX_FILE_MB: "20"
+      MAX_HOLD_PER_USER: "100"
+      LOCK_TTL_HOURS: "24"
+      WORKER_IN_API: "true"
+      LOG_LEVEL: info
+      TZ: Asia/Shanghai
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      pg:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../web
+    ports:
+      - "${WEB_PORT:-8088}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  storage:
