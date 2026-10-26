@@ -4,7 +4,7 @@ web/dist/
 server/bin/
 
 # 运行数据（不进仓库）
-storage/
+/storage/
 backups/
 .run/
 *.log
