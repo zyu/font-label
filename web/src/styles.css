@@ -72,6 +72,11 @@ body {
 
 .score-grid { display: flex; flex-direction: column; gap: 7px; }
 .score-row { display: flex; align-items: center; gap: 10px; }
+
+/* 五维点评：维度名在左、输入框在右，一行一维，省纵向空间 */
+.dim-comment-list { display: flex; flex-direction: column; gap: 8px; }
+.dim-comment-row { display: flex; align-items: flex-start; gap: 8px; }
+.dim-comment-row textarea { resize: none; }
 .score-label { width: 46px; font-weight: 600; }
 .score-buttons { display: grid; grid-template-columns: repeat(11, 1fr); gap: 4px; flex: 1; }
 .score-btn {

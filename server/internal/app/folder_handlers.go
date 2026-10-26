@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
@@ -135,13 +137,7 @@ func (s *Server) handleUpdateFolder(c *gin.Context) {
 		httpx.Fail(c, httpx.BadRequest("请求体格式错误"))
 		return
 	}
-	var oldName string
-	if err := s.pool().QueryRow(c.Request.Context(),
-		`SELECT name FROM folders WHERE id=$1`, id).Scan(&oldName); err != nil {
-		httpx.Fail(c, httpx.NotFound("文件夹不存在"))
-		return
-	}
-	newName := oldName
+	var oldName, newName string
 	if in.Name != nil {
 		newName = strings.TrimSpace(*in.Name)
 		if !folderNameRe.MatchString(newName) {
@@ -149,19 +145,36 @@ func (s *Server) handleUpdateFolder(c *gin.Context) {
 			return
 		}
 	}
-	var archivedAt any
-	_ = archivedAt
-	sql := `UPDATE folders SET name=$2, note=COALESCE($3, note), updated_at=now()`
-	args := []any{id, newName, in.Note}
-	if in.Archived != nil {
-		if *in.Archived {
-			sql += `, archived_at=now()`
-		} else {
-			sql += `, archived_at=NULL`
+	ctx := c.Request.Context()
+	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		// Uploads take a shared lock on this row before inserting an image.
+		// Lock first, then check completion in a fresh statement snapshot.
+		if err := tx.QueryRow(ctx, `SELECT name FROM folders WHERE id=$1 FOR UPDATE`, id).Scan(&oldName); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.NotFound("文件夹不存在")
+			}
+			return err
 		}
-	}
-	sql += ` WHERE id=$1`
-	if _, err := s.pool().Exec(c.Request.Context(), sql, args...); err != nil {
+		if in.Name == nil {
+			newName = oldName
+		}
+		if in.Archived != nil && *in.Archived {
+			var incomplete bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM images WHERE folder_id=$1 AND status NOT IN ('approved','excluded')
+			)`, id).Scan(&incomplete); err != nil {
+				return err
+			}
+			if incomplete {
+				return httpx.Conflict("文件夹内还有未处理完成的图片，全部审核通过或确认无效后才可归档")
+			}
+		}
+		_, err := tx.Exec(ctx, `UPDATE folders SET name=$2, note=COALESCE($3,note), updated_at=now(),
+			archived_at=CASE WHEN $4::boolean IS NULL THEN archived_at WHEN $4 THEN now() ELSE NULL END
+			WHERE id=$1`, id, newName, in.Note, in.Archived)
+		return err
+	})
+	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
 			httpx.Fail(c, httpx.Conflict("文件夹名称已存在"))
 			return

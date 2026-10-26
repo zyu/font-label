@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Alert, Button, Card, Descriptions, Empty, Input, Modal, Space, Spin, Tag, Typography, message } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import { Alert, Button, Card, Descriptions, Empty, Input, InputNumber, Modal, Space, Spin, Tag, Typography, message } from "antd";
 import { CheckOutlined, CloseOutlined, ArrowLeftOutlined, ArrowRightOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
@@ -7,6 +7,7 @@ import { api, ApiError } from "../api/client";
 import type { ImageDTO, ImageDetail, Page } from "../api/types";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
+import { computeTotal } from "../components/ScorePanel";
 
 export default function ReviewPage() {
   const { imageId } = useParams();
@@ -14,9 +15,13 @@ export default function ReviewPage() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const { me } = useAuth();
+  const rubric = me!.rubric;
+  const dims = rubric.dims;
   const [rejectOpen, setRejectOpen] = useState(false);
   const [comment, setComment] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // 审核改分：以原分数为起点，只把改动过的维度作为 score_patch 提交
+  const [patched, setPatched] = useState<Record<string, number>>({});
 
   const detail = useQuery({
     queryKey: ["image", id],
@@ -28,6 +33,8 @@ export default function ReviewPage() {
     queryKey: ["review-queue-nav"],
     queryFn: () => api.get<Page<ImageDTO>>("/reviews/queue?page_size=200"),
   });
+
+  const image = detail.data?.image;
 
   const review = useMutation({
     mutationFn: (body: unknown) => api.post(`/images/${id}/review`, body),
@@ -54,6 +61,32 @@ export default function ReviewPage() {
     setTags([]);
   }, [id]);
 
+  // 改分草稿：切图时用该图原有分数重置
+  useEffect(() => {
+    if (!image) return;
+    setPatched({ ...(image.scores ?? {}) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [image?.id]);
+
+  const mergedScores = useMemo(
+    () => ({ ...(image?.scores ?? {}), ...patched }),
+    [image?.scores, patched],
+  );
+
+  // 只提交真正改过的维度，未改的维度保持原值
+  const changedScorePatch = useMemo(() => {
+    const out: Record<string, number> = {};
+    if (!image) return out;
+    for (const d of dims) {
+      const cur = mergedScores[d.key];
+      if (cur !== undefined && cur !== image.scores?.[d.key]) out[d.key] = cur;
+    }
+    return out;
+  }, [dims, mergedScores, image]);
+
+  const changedCount = Object.keys(changedScorePatch).length;
+  const newTotal = image && image.kind === "score" ? computeTotal(dims, mergedScores) : null;
+
   if (detail.isLoading) {
     return (
       <div style={{ padding: 80, textAlign: "center" }}>
@@ -61,14 +94,12 @@ export default function ReviewPage() {
       </div>
     );
   }
-  const image = detail.data?.image;
   if (!image) return <Empty description="图片不存在" />;
   const list = queue.data?.items ?? [];
   const idx = list.findIndex((x) => x.id === id);
   const prev = idx > 0 ? list[idx - 1] : undefined;
   const next = idx >= 0 ? list[idx + 1] : undefined;
 
-  const dims = me!.rubric.dims;
   const latest = detail.data?.reviews?.[0];
 
   return (
@@ -91,7 +122,7 @@ export default function ReviewPage() {
 
       <div className="annotate-body">
         <Card className="canvas-card" styles={{ body: { padding: 0, display: "flex", flex: 1 } }}>
-          <ImageViewer src={image.preview_url} alt={image.stored_name} resetKey={image.id} />
+          <ImageViewer src={image.original_url || image.preview_url} alt={image.stored_name} resetKey={image.id} />
         </Card>
 
         <div className="panel-card">
@@ -109,10 +140,67 @@ export default function ReviewPage() {
               ...dims.map((d) => ({
                 key: d.key,
                 label: d.label,
-                children: image.scores?.[d.key] ?? "-",
+                children: (
+                  <div>
+                    <b>{image.scores?.[d.key] ?? "-"}</b>
+                    <span style={{ marginLeft: 6, color: "#7b8598" }}>/{d.max || 20}</span>
+                    <div style={{ fontSize: 12, color: image.dim_comments?.[d.key] ? "#44506a" : "#bbb", marginTop: 2, whiteSpace: "pre-wrap" }}>
+                      {image.dim_comments?.[d.key] || "（该维未写点评）"}
+                    </div>
+                  </div>
+                ),
               })),
             ]}
           />
+
+          {image.kind === "score" && (
+            <Card
+              size="small"
+              title="审核改分（可选）"
+              style={{ margin: "12px 0" }}
+              extra={
+                <span style={{ fontSize: 12, color: changedCount > 0 ? "#cf1322" : "#7b8598" }}>
+                  原总分 {image.total ?? "-"} → 改后 {newTotal ?? "-"}
+                  {changedCount > 0 ? `（改了 ${changedCount} 维）` : ""}
+                </span>
+              }
+            >
+              <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                {dims.map((d) => {
+                  const cur = mergedScores[d.key];
+                  const orig = image.scores?.[d.key];
+                  const changed = cur !== undefined && cur !== orig;
+                  return (
+                    <div
+                      key={d.key}
+                      data-review-dim={d.key}
+                      style={{ display: "flex", alignItems: "center", gap: 8 }}
+                    >
+                      <span style={{ width: 92, fontSize: 13 }}>{d.label}</span>
+                      <InputNumber
+                        size="small"
+                        min={0}
+                        max={d.max || 20}
+                        step={d.step && d.step > 1 ? d.step : 5}
+                        value={cur ?? null}
+                        disabled={image.status !== "submitted"}
+                        onChange={(v) =>
+                          setPatched((p) => ({ ...p, [d.key]: typeof v === "number" ? v : 0 }))
+                        }
+                        data-test={`review-score-${d.key}`}
+                        style={{ width: 66 }}
+                      />
+                      <span style={{ fontSize: 12, color: "#7b8598" }}>/{d.max || 20}</span>
+                      {changed && <Tag color="orange">原 {orig ?? "—"}</Tag>}
+                    </div>
+                  );
+                })}
+              </Space>
+              <div style={{ fontSize: 12, color: "#7b8598", marginTop: 6 }}>
+                改分后按五维重算总分，点「通过」时一并保存；不填则保持原分数
+              </div>
+            </Card>
+          )}
 
           {image.kind === "exception" ? (
             <Alert
@@ -131,11 +219,7 @@ export default function ReviewPage() {
                 </Space>
               }
             />
-          ) : (
-            <Card size="small" title="点评" style={{ margin: "12px 0" }} styles={{ body: { whiteSpace: "pre-wrap" } }}>
-              {image.comment || <span style={{ color: "#999" }}>（空）</span>}
-            </Card>
-          )}
+          ) : null}
 
           {latest && (
             <Card size="small" title="上一次审核" style={{ marginBottom: 12 }} styles={{ body: { whiteSpace: "pre-wrap" } }}>
@@ -158,7 +242,13 @@ export default function ReviewPage() {
               icon={<CheckOutlined />}
               loading={review.isPending}
               disabled={image.status !== "submitted"}
-              onClick={() => review.mutate({ action: "approve" })}
+              onClick={() =>
+                review.mutate({
+                  action: "approve",
+                  ...(changedCount > 0 ? { score_patch: changedScorePatch } : {}),
+                  ...(comment.trim() ? { comment: comment.trim() } : {}),
+                })
+              }
               data-test="approve"
             >
               通过（{image.kind === "exception" ? "异常成立，记无效图" : "评分合格"}）

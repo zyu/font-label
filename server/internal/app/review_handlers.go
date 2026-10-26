@@ -177,6 +177,7 @@ func (s *Server) handleReview(c *gin.Context) {
 	}
 
 	var patchJSON []byte
+	var mergedJSON []byte
 	var newTotal float64
 	if len(in.ScorePatch) > 0 {
 		if kind != "score" {
@@ -188,12 +189,13 @@ func (s *Server) handleReview(c *gin.Context) {
 		for k, v := range in.ScorePatch {
 			merged[k] = v
 		}
-		if err := rubric.ValidateScores(merged); err != nil {
+		if err := rubric.ValidatePatch(in.ScorePatch); err != nil {
 			httpx.Fail(c, httpx.Validation(map[string]string{"score_patch": err.Error()}, err.Error()))
 			return
 		}
 		newTotal, _ = rubric.Total(merged)
 		patchJSON, _ = json.Marshal(in.ScorePatch)
+		mergedJSON, _ = json.Marshal(merged)
 	}
 
 	var drawingsJSON []byte
@@ -224,9 +226,10 @@ func (s *Server) handleReview(c *gin.Context) {
 		}
 		if len(in.ScorePatch) > 0 {
 			grade := rubric.Grade(newTotal)
+			// 五维分数一起写回：只改 total 会导致导出/复核时的维度分与总分对不上
 			if _, err := tx.Exec(ctx,
-				`UPDATE annotations SET total=$2, grade=$3, updated_at=now() WHERE image_id=$1`,
-				id, newTotal, grade); err != nil {
+				`UPDATE annotations SET scores=$4::jsonb, total=$2, grade=$3, updated_at=now() WHERE image_id=$1`,
+				id, newTotal, grade, mergedJSON); err != nil {
 				return err
 			}
 		}

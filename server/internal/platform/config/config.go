@@ -50,7 +50,7 @@ func Load() Config {
 		MediaSecret:   get("MEDIA_SIGN_SECRET", "dev-only-media-secret-change-me-9876543210"),
 		MediaTTL:      time.Duration(getInt("MEDIA_SIGN_TTL_MIN", 60)) * time.Minute,
 		StorageRoot:   get("STORAGE_ROOT", "./storage"),
-		MaxFileMB:     int64(getInt("MAX_FILE_MB", 20)),
+		MaxFileMB:     int64(getInt("MAX_FILE_MB", 10)),
 		MaxHold:       getInt("MAX_HOLD_PER_USER", 100),
 		LockTTL:       time.Duration(getInt("LOCK_TTL_HOURS", 24)) * time.Hour,
 		AdminUser:     get("ADMIN_INIT_USERNAME", "admin"),

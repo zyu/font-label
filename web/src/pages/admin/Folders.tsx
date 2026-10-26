@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Table, Tag, message } from "antd";
+import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Table, Tag, Tooltip, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { FolderDTO } from "../../api/types";
@@ -86,9 +86,9 @@ export default function FoldersPage() {
               width: 180,
               render: (_: unknown, r: FolderDTO) => (
                 <Progress
-                  percent={Math.round(((r.total - r.unassigned) / Math.max(1, r.total)) * 100)}
+                  percent={Math.round(((r.approved + r.excluded) / Math.max(1, r.total)) * 100)}
                   size="small"
-                  format={() => `${r.total - r.unassigned}/${r.total}`}
+                  format={() => `${r.approved + r.excluded}/${r.total}`}
                 />
               ),
             },
@@ -110,9 +110,13 @@ export default function FoldersPage() {
                   >
                     编辑
                   </a>
-                  <a onClick={() => update.mutate({ id: r.id, body: { archived: !r.archived } })}>
-                    {r.archived ? "取消归档" : "归档"}
-                  </a>
+                  <Tooltip title={!r.archived && r.approved + r.excluded < r.total ? "文件夹内还有未处理完成的图片，全部审核通过或确认无效后才可归档" : undefined}>
+                    <Button type="link" size="small"
+                      disabled={update.isPending || (!r.archived && r.approved + r.excluded < r.total)}
+                      onClick={() => update.mutate({ id: r.id, body: { archived: !r.archived } })}>
+                      {r.archived ? "取消归档" : "归档"}
+                    </Button>
+                  </Tooltip>
                   <Popconfirm
                     title="仅空文件夹可删除，确定？"
                     onConfirm={() => remove.mutate(r.id)}

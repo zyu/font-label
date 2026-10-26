@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image"
 	"image/draw"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 
@@ -13,6 +14,9 @@ import (
 
 	xdraw "golang.org/x/image/draw"
 )
+
+// 说明：gif 取第一帧转成 jpg（动图在学生作业场景没有意义，也避免预览闪烁）。
+var _ = gif.GIF{}
 
 // Result holds the normalized original plus the two derived sizes.
 type Result struct {

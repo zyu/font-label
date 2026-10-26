@@ -180,9 +180,12 @@ func (s *Server) handleUpload(c *gin.Context) {
 
 		var imageID int64
 		err = s.pool().QueryRow(ctx,
-			`INSERT INTO images (folder_id, stored_name, day, seq, orig_name, ext, mime, bytes, width, height,
+			`WITH target_folder AS (
+			    SELECT id FROM folders WHERE id=$1 AND archived_at IS NULL FOR SHARE
+			 )
+			 INSERT INTO images (folder_id, stored_name, day, seq, orig_name, ext, mime, bytes, width, height,
 			                    sha256, rel_path, thumb_path, preview_path, uploaded_by)
-			 VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			 SELECT id,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15 FROM target_folder
 			 RETURNING id`,
 			fid, storedName, dayStr, seq, fh.Filename, proc.Ext, mimeOf(proc.Ext),
 			int64(len(proc.Original)), proc.Width, proc.Height, sha, relPath, thumbRel, previewRel, me.ID).
@@ -191,7 +194,10 @@ func (s *Server) handleUpload(c *gin.Context) {
 			_ = s.store.Remove(relPath)
 			_ = s.store.Remove(previewRel)
 			_ = s.store.Remove(thumbRel)
-			if isUnique(err) {
+			if errors.Is(err, pgx.ErrNoRows) {
+				item.Reason, item.Message = "FOLDER_ARCHIVED", "文件夹已归档，请取消归档后再上传"
+				failCount++
+			} else if isUnique(err) {
 				item.Reason, item.Message = "DUPLICATE", "同图已存在"
 				dupCount++
 			} else {
@@ -222,8 +228,12 @@ func (s *Server) handleUpload(c *gin.Context) {
 func (s *Server) resolveFolder(ctx context.Context, folderID int64, name string, actor int64) (int64, string, error) {
 	if folderID > 0 {
 		var n string
-		if err := s.pool().QueryRow(ctx, `SELECT name FROM folders WHERE id=$1`, folderID).Scan(&n); err != nil {
+		var archived bool
+		if err := s.pool().QueryRow(ctx, `SELECT name, archived_at IS NOT NULL FROM folders WHERE id=$1`, folderID).Scan(&n, &archived); err != nil {
 			return 0, "", httpx.NotFound("文件夹不存在")
+		}
+		if archived {
+			return 0, "", httpx.Conflict("文件夹已归档，请取消归档后再上传")
 		}
 		return folderID, n, nil
 	}
@@ -241,9 +251,13 @@ func (s *Server) resolveFolder(ctx context.Context, folderID int64, name string,
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return 0, "", err
 		}
+		var archived bool
 		if err := s.pool().QueryRow(ctx,
-			`SELECT id FROM folders WHERE lower(name)=lower($1)`, name).Scan(&id); err != nil {
+			`SELECT id, name, archived_at IS NOT NULL FROM folders WHERE lower(name)=lower($1)`, name).Scan(&id, &name, &archived); err != nil {
 			return 0, "", err
+		}
+		if archived {
+			return 0, "", httpx.Conflict("文件夹已归档，请取消归档后再上传")
 		}
 	}
 	_ = os.MkdirAll(filepath.Join(s.store.Root(), name), 0o755)

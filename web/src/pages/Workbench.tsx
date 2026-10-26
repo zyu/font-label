@@ -63,6 +63,14 @@ export default function WorkbenchPage() {
     onSuccess: (res) => {
       if (res.granted === 0) {
         message.warning("没有可领取的图片了（可能已被其他人领走）");
+      } else if (res.hold && res.hold.current >= res.hold.limit) {
+        // 整包领取也会被持有上限截断，这里说清楚还剩多少在池里
+        message.warning(
+          `已领取 ${res.granted} 张，已达持有上限 ${res.hold.limit} 张` +
+            (res.remaining_in_pool > 0 ? `，文件夹里还剩 ${res.remaining_in_pool} 张，完成后再领` : ""),
+        );
+        setTab("active");
+        if (res.images.length > 0) nav(`/workbench/${res.images[0].id}`);
       } else {
         message.success(`已领取 ${res.granted} 张`);
         setTab("active");

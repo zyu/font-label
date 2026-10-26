@@ -16,9 +16,9 @@ import (
 )
 
 var (
-	ErrNoToken   = errors.New("no token")
-	ErrBadToken  = errors.New("bad token")
-	ErrDisabled  = errors.New("user disabled")
+	ErrNoToken    = errors.New("no token")
+	ErrBadToken   = errors.New("bad token")
+	ErrDisabled   = errors.New("user disabled")
 	ErrTokenStale = errors.New("token stale")
 )
 
@@ -47,10 +47,10 @@ func HashPassword(password string) (string, error) {
 		return "", err
 	}
 	const (
-		timeCost   = 3
-		memory     = 64 * 1024
-		threads    = 2
-		keyLen     = 32
+		timeCost = 3
+		memory   = 64 * 1024
+		threads  = 2
+		keyLen   = 32
 	)
 	key := argon2.IDKey([]byte(password), salt, timeCost, memory, threads, keyLen)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",

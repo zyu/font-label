@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -13,15 +13,19 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
 )
 
+// client_submit_id 落库列是 uuid，格式不对要在入口挡住，不能让它变成 500。
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
 type submitInput struct {
-	ClientSubmitID   string         `json:"client_submit_id"`
-	Kind             string         `json:"kind"`
-	Scores           map[string]int `json:"scores"`
-	Comment          string         `json:"comment"`
-	ExceptionReasons []string       `json:"exception_reasons"`
-	ExceptionNote    string         `json:"exception_note"`
-	DurationMS       int            `json:"duration_ms"`
-	TotalOverride    *float64       `json:"total_override"`
+	ClientSubmitID   string            `json:"client_submit_id"`
+	Kind             string            `json:"kind"`
+	Scores           map[string]int    `json:"scores"`
+	DimComments      map[string]string `json:"dim_comments"`
+	Comment          string            `json:"comment"`
+	ExceptionReasons []string          `json:"exception_reasons"`
+	ExceptionNote    string            `json:"exception_note"`
+	DurationMS       int               `json:"duration_ms"`
+	TotalOverride    *float64          `json:"total_override"`
 }
 
 func (s *Server) handleSaveDraft(c *gin.Context) {
@@ -92,6 +96,10 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		httpx.Fail(c, httpx.BadRequest("请求体格式错误"))
 		return
 	}
+	if in.ClientSubmitID != "" && !uuidRe.MatchString(in.ClientSubmitID) {
+		httpx.Fail(c, httpx.Validation(map[string]string{"client_submit_id": "需为 UUID，如 8f14e45f-ea4b-4c1e-9a63-2b0f0a1c7d33"}, "提交标识格式不正确"))
+		return
+	}
 	me := auth.MustCurrent(c)
 	ctx := c.Request.Context()
 
@@ -145,11 +153,13 @@ func (s *Server) handleSubmit(c *gin.Context) {
 	}
 
 	var (
-		total      float64
-		grade      string
-		comment    = strings.TrimSpace(in.Comment)
-		reasons    = in.ExceptionReasons
-		scoresJSON []byte
+		total          float64
+		grade          string
+		comment        = strings.TrimSpace(in.Comment)
+		reasons        = in.ExceptionReasons
+		scoresJSON     []byte
+		dimComments    = map[string]string{}
+		dimCommentsRaw []byte
 	)
 	if reasons == nil {
 		reasons = []string{}
@@ -159,12 +169,15 @@ func (s *Server) handleSubmit(c *gin.Context) {
 			httpx.Fail(c, httpx.Validation(map[string]string{"scores": err.Error()}, err.Error()))
 			return
 		}
-		n := utf8.RuneCountInString(comment)
-		if n < rubric.CommentMin || n > rubric.CommentMax {
-			httpx.Fail(c, httpx.Validation(map[string]string{"comment": "点评需 " + itoa(rubric.CommentMin) + "~" + itoa(rubric.CommentMax) + " 字"},
-				"点评字数不符合要求（当前 "+itoa(n)+" 字）"))
+		// 点评按维度分开写：五维各一条，每条形如「白平衡：…」，字数由 rubric 配置
+		if err := rubric.ValidateDimComments(in.DimComments); err != nil {
+			httpx.Fail(c, httpx.Validation(map[string]string{"dim_comments": err.Error()}, err.Error()))
 			return
 		}
+		for k, v := range in.DimComments {
+			dimComments[k] = strings.TrimSpace(v)
+		}
+		comment = rubric.JoinDimComments(dimComments)
 		total, grade = rubric.Total(in.Scores)
 		if in.TotalOverride != nil {
 			if !rubric.AllowTotalOver {
@@ -193,6 +206,7 @@ func (s *Server) handleSubmit(c *gin.Context) {
 	}
 
 	snap, _ := json.Marshal(rubric.Snapshot())
+	dimCommentsRaw, _ = json.Marshal(dimComments)
 	var submitUUID any
 	if in.ClientSubmitID != "" {
 		submitUUID = in.ClientSubmitID
@@ -207,25 +221,27 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		var annID int64
 		err := tx.QueryRow(ctx,
 			`INSERT INTO annotations (image_id, annotator_id, version, kind, scores, total, grade, comment,
-			        exception_reasons, exception_note, rubric_id, rubric_snapshot, duration_ms,
+			        dim_comments, exception_reasons, exception_note, rubric_id, rubric_snapshot, duration_ms,
 			        client_submit_id, submitted_at, updated_at)
-			 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,now(),now())
+			 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$15::jsonb,$9,$10,$11,$12::jsonb,$13,$14,now(),now())
 			 ON CONFLICT (image_id) DO UPDATE SET
 			   annotator_id=EXCLUDED.annotator_id, version=EXCLUDED.version, kind=EXCLUDED.kind,
 			   scores=EXCLUDED.scores, total=EXCLUDED.total, grade=EXCLUDED.grade,
-			   comment=EXCLUDED.comment, exception_reasons=EXCLUDED.exception_reasons,
+			   comment=EXCLUDED.comment, dim_comments=EXCLUDED.dim_comments,
+			   exception_reasons=EXCLUDED.exception_reasons,
 			   exception_note=EXCLUDED.exception_note, rubric_id=EXCLUDED.rubric_id,
 			   rubric_snapshot=EXCLUDED.rubric_snapshot, duration_ms=EXCLUDED.duration_ms,
 			   client_submit_id=EXCLUDED.client_submit_id, submitted_at=now(), updated_at=now()
 			 RETURNING id`,
 			id, me.ID, newVersion, kind, scoresJSON, total, grade, comment,
-			reasons, in.ExceptionNote, rubric.ID, snap, in.DurationMS, submitUUID).Scan(&annID)
+			reasons, in.ExceptionNote, rubric.ID, snap, in.DurationMS, submitUUID, dimCommentsRaw).Scan(&annID)
 		if err != nil {
 			return err
 		}
 		payload, _ := json.Marshal(gin.H{
 			"kind": kind, "scores": in.Scores, "total": total, "grade": grade,
-			"comment": comment, "exception_reasons": reasons, "exception_note": in.ExceptionNote,
+			"comment": comment, "dim_comments": dimComments,
+			"exception_reasons": reasons, "exception_note": in.ExceptionNote,
 		})
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO annotation_versions (image_id, version, annotator_id, payload, submitted_at)

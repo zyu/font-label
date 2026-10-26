@@ -75,47 +75,50 @@ func (s *Server) settingValue(ctx context.Context, key string) any {
 
 func (s *Server) activeRubric(ctx context.Context) (score.Rubric, error) {
 	var (
-		id                 int64
-		name, dims, bands  string
-		cmin, cmax         int
-		allow              bool
+		id                int64
+		name, dims, bands string
+		cmin, cmax        int
+		dmin, dmax        int
+		allow             bool
 	)
 	err := s.pool().QueryRow(ctx,
-		`SELECT id, name, dims::text, grade_bands::text, comment_min, comment_max, allow_total_override
+		`SELECT id, name, dims::text, grade_bands::text, comment_min, comment_max,
+		        dim_comment_min, dim_comment_max, allow_total_override
 		   FROM rubrics WHERE is_active LIMIT 1`).
-		Scan(&id, &name, &dims, &bands, &cmin, &cmax, &allow)
+		Scan(&id, &name, &dims, &bands, &cmin, &cmax, &dmin, &dmax, &allow)
 	if err != nil {
 		return score.Rubric{}, fmt.Errorf("没有启用的评分方案: %w", err)
 	}
-	return score.FromJSON(id, name, []byte(dims), []byte(bands), cmin, cmax, allow)
+	return score.FromJSON(id, name, []byte(dims), []byte(bands), cmin, cmax, dmin, dmax, allow)
 }
 
 // ---------- image row / dto ----------
 
 type imageRow struct {
-	ID           int64
-	FolderID     int64
-	Folder       string
-	StoredName   string
-	OrigName     string
-	Seq          int
-	Day          time.Time
-	Status       string
-	Width        int
-	Height       int
-	AnnotatorID  int64
-	Annotator    string
-	RejectCount  int
-	ReviewCount  int
-	Kind         string
-	Total        float64
-	Grade        string
-	Comment      string
-	Scores       string
-	Exceptions   []string
-	DurationMS   int
-	ClaimedAt    time.Time
-	SubmittedAt  time.Time
+	ID          int64
+	FolderID    int64
+	Folder      string
+	StoredName  string
+	OrigName    string
+	Seq         int
+	Day         time.Time
+	Status      string
+	Width       int
+	Height      int
+	AnnotatorID int64
+	Annotator   string
+	RejectCount int
+	ReviewCount int
+	Kind        string
+	Total       float64
+	Grade       string
+	Comment     string
+	Scores      string
+	DimComments string
+	Exceptions  []string
+	DurationMS  int
+	ClaimedAt   time.Time
+	SubmittedAt time.Time
 }
 
 const imageSelect = `
@@ -126,7 +129,7 @@ SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.st
        COALESCE(i.claimed_at, to_timestamp(0)),
        COALESCE(i.submitted_at, to_timestamp(0)),
        COALESCE(a.kind,''), COALESCE(a.total,-1), COALESCE(a.grade,''),
-       COALESCE(a.comment,''), COALESCE(a.scores::text,'{}'),
+       COALESCE(a.comment,''), COALESCE(a.scores::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
        COALESCE(a.exception_reasons,'{}'), COALESCE(a.duration_ms,0)
   FROM images i
   JOIN folders f ON f.id = i.folder_id
@@ -140,7 +143,7 @@ func scanImage(row pgx.Row) (imageRow, error) {
 	err := row.Scan(&r.ID, &r.FolderID, &r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Day, &r.Status,
 		&r.Width, &r.Height, &r.AnnotatorID, &r.Annotator, &r.RejectCount, &r.ReviewCount,
 		&r.ClaimedAt, &r.SubmittedAt, &r.Kind, &r.Total, &r.Grade, &r.Comment, &r.Scores,
-		&r.Exceptions, &r.DurationMS)
+		&r.DimComments, &r.Exceptions, &r.DurationMS)
 	return r, err
 }
 
@@ -197,6 +200,10 @@ func (s *Server) toDTO(r imageRow) ImageDTO {
 	d.Scores = map[string]int{}
 	if r.Scores != "" && r.Scores != "{}" {
 		_ = json.Unmarshal([]byte(r.Scores), &d.Scores)
+	}
+	d.DimComments = map[string]string{}
+	if r.DimComments != "" && r.DimComments != "{}" && r.DimComments != "null" {
+		_ = json.Unmarshal([]byte(r.DimComments), &d.DimComments)
 	}
 	return d
 }

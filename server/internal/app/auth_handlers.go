@@ -44,10 +44,10 @@ func (s *Server) handleLogin(c *gin.Context) {
 	}
 
 	var (
-		id                                int64
+		id                                        int64
 		username, displayName, role, status, hash string
-		tv                                int
-		mustChange                        bool
+		tv                                        int
+		mustChange                                bool
 	)
 	err := s.pool().QueryRow(c.Request.Context(),
 		`SELECT id, username, display_name, role, status, password_hash, token_version, must_change_pwd
@@ -104,18 +104,18 @@ func (s *Server) handleMe(c *gin.Context) {
 			"id": p.ID, "username": p.Username, "display_name": p.DisplayName,
 			"role": p.Role, "must_change_pwd": mustChange,
 		},
-		"rubric":            rubric,
-		"exception_reasons": s.settingValue(ctx, "exception_reasons"),
+		"rubric":             rubric,
+		"exception_reasons":  s.settingValue(ctx, "exception_reasons"),
 		"reject_reason_tags": s.settingValue(ctx, "reject_reason_tags"),
-		"comment_templates": s.settingValue(ctx, "comment_templates"),
+		"comment_templates":  s.settingValue(ctx, "comment_templates"),
 		"limits": gin.H{
-			"max_hold_per_user":  s.settingInt(ctx, "max_hold_per_user", s.cfg.MaxHold),
-			"lock_ttl_hours":     s.settingInt(ctx, "lock_ttl_hours", 24),
+			"max_hold_per_user":   s.settingInt(ctx, "max_hold_per_user", s.cfg.MaxHold),
+			"lock_ttl_hours":      s.settingInt(ctx, "lock_ttl_hours", 24),
 			"claim_default_count": s.settingInt(ctx, "claim_default_count", 10),
-			"max_claim_count":    s.settingInt(ctx, "max_claim_count", 100),
-			"max_upload_files":   s.settingInt(ctx, "max_upload_files", 200),
-			"max_file_mb":        s.settingInt(ctx, "max_file_mb", int(s.cfg.MaxFileMB)),
-			"auto_next":          s.settingInt(ctx, "auto_next_after_submit", 1) == 1,
+			"max_claim_count":     s.settingInt(ctx, "max_claim_count", 100),
+			"max_upload_files":    s.settingInt(ctx, "max_upload_files", 200),
+			"max_file_mb":         s.settingInt(ctx, "max_file_mb", int(s.cfg.MaxFileMB)),
+			"auto_next":           s.settingInt(ctx, "auto_next_after_submit", 1) == 1,
 		},
 	})
 }

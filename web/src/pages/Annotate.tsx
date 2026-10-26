@@ -24,12 +24,14 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import type { ImageDTO, ImageDetail, Page, Review } from "../api/types";
+import type { Draft, ImageDTO, ImageDetail, Page, Review } from "../api/types";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
 import ScorePanel, { computeTotal, snapToStep } from "../components/ScorePanel";
 import ExceptionPanel from "../components/ExceptionPanel";
 import ExampleDrawer from "../components/ExampleDrawer";
+import { dimCommentStates, dimCommentsOk, firstBlockingDimComment } from "../lib/dimComments";
+import { createSubmitId } from "../lib/submitId";
 
 const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
@@ -41,14 +43,18 @@ const SHORTCUTS = [
 
 export default function AnnotatePage() {
   const { imageId } = useParams();
-  const id = Number(imageId);
+  return <AnnotationEditor key={imageId} id={Number(imageId)} />;
+}
+
+function AnnotationEditor({ id }: { id: number }) {
   const nav = useNavigate();
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
 
   const [scores, setScores] = useState<Record<string, number>>({});
-  const [comment, setComment] = useState("");
+  // 五维各自的点评：{ white: "...", black: "..." }
+  const [dimComments, setDimComments] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
   const [hotkeyDim, setHotkeyDim] = useState(rubric.dims[0]?.key ?? "fill");
   const [excOpen, setExcOpen] = useState(false);
@@ -56,6 +62,9 @@ export default function AnnotatePage() {
   const [exampleOpen, setExampleOpen] = useState(false);
   const [initialized, setInitialized] = useState<number | null>(null);
   const startedAt = useRef<number>(Date.now());
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const draftSaves = useRef<Promise<unknown>>(Promise.resolve());
+  const submitting = useRef(false);
 
   const detail = useQuery({
     queryKey: ["image", id],
@@ -80,11 +89,11 @@ export default function AnnotatePage() {
     if (!image || initialized === image.id) return;
     const draft = detail.data?.draft;
     setScores(snapToStep(rubric.dims, draft?.scores ?? image.scores ?? {}));
-    setComment(draft?.comment ?? image.comment ?? "");
+    setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
     setInitialized(image.id);
     startedAt.current = Date.now();
-  }, [image, detail.data?.draft, initialized]);
+  }, [image, detail.data?.draft, initialized, rubric.dims]);
 
   const total = useMemo(() => computeTotal(rubric.dims, scores), [rubric.dims, scores]);
   const complete = rubric.dims.every((d) => scores[d.key] !== undefined);
@@ -94,24 +103,50 @@ export default function AnnotatePage() {
     return bands.find((b) => totalValue >= b.min)?.label ?? "";
   }, [rubric.grade_bands, totalValue]);
 
-  const commentLen = [...comment.trim()].length;
-  const commentOk = commentLen >= rubric.comment_min && commentLen <= rubric.comment_max;
+  const dimMin = rubric.dim_comment_min || 10;
+  const dimMax = rubric.dim_comment_max || 50;
+  const commentStates = dimCommentStates(rubric.dims, dimComments, dimMin, dimMax);
+  const allCommentsOk = dimCommentsOk(rubric.dims, dimComments, dimMin, dimMax);
+  // 提交按钮为什么点不动：把原因说清楚，而不是只把按钮变灰
+  const missingDims = rubric.dims.filter((d) => scores[d.key] === undefined).map((d) => d.label);
+  const blockingComment = firstBlockingDimComment(rubric.dims, dimComments, dimMin, dimMax);
+  const submitBlockedReason = missingDims.length
+    ? `还有 ${missingDims.length} 维没打分：${missingDims.join("、")}`
+    : blockingComment
+      ? `${blockingComment.label}点评${blockingComment.hint}`
+      : "";
 
   const saveDraft = useCallback(
-    (payload: unknown) => api.put(`/images/${id}/draft`, payload).catch(() => undefined),
-    [id],
+    (payload: Draft) => {
+      // Serialize autosave and explicit save so an older request cannot win.
+      const saved = draftSaves.current.catch(() => undefined).then(async () => {
+        await qc.cancelQueries({ queryKey: ["image", id] });
+        await api.put(`/images/${id}/draft`, payload);
+        await qc.cancelQueries({ queryKey: ["image", id] });
+        qc.setQueryData<ImageDetail>(["image", id], (current) => current ? { ...current, draft: payload } : current);
+      });
+      draftSaves.current = saved;
+      return saved;
+    },
+    [id, qc],
   );
 
   useEffect(() => {
-    if (!dirty || !image) return;
-    const t = setTimeout(() => {
-      saveDraft({ kind: "score", scores, comment });
+    if (!dirty || !image || submitting.current) return;
+    draftTimer.current = setTimeout(() => {
+      saveDraft({ kind: "score", scores, dim_comments: dimComments }).catch((e) => {
+        message.error(e instanceof ApiError ? e.message : "草稿保存失败，请重试");
+      });
     }, 1000);
-    return () => clearTimeout(t);
-  }, [dirty, scores, comment, image, saveDraft]);
+    return () => clearTimeout(draftTimer.current);
+  }, [dirty, scores, dimComments, image, saveDraft]);
 
   const submit = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => api.post(`/images/${id}/submit`, payload),
+    mutationFn: async (payload: Record<string, unknown>) => {
+      clearTimeout(draftTimer.current);
+      await draftSaves.current.catch(() => undefined);
+      return api.post(`/images/${id}/submit`, { ...payload, client_submit_id: createSubmitId() });
+    },
     onSuccess: () => {
       message.success("已提交，等待审核");
       qc.invalidateQueries({ queryKey: ["image", id] });
@@ -125,23 +160,29 @@ export default function AnnotatePage() {
       if (me?.limits.auto_next && next) nav(`/workbench/${next.id}`);
       else nav("/workbench");
     },
-    onError: (e) => message.error(e instanceof ApiError ? e.message : "提交失败"),
+    onError: (e) => message.error(e instanceof Error ? e.message : "提交失败，请重试"),
+    onSettled: () => { submitting.current = false; },
   });
+
+  function send(payload: Record<string, unknown>) {
+    if (submitting.current) return;
+    submitting.current = true;
+    submit.mutate(payload);
+  }
 
   function doSubmit() {
     if (!complete) {
       message.warning(`五个维度都要打分才能提交（还差 ${rubric.dims.filter((d) => scores[d.key] === undefined).length} 个）`);
       return;
     }
-    if (!commentOk) {
-      message.warning(`点评需 ${rubric.comment_min}~${rubric.comment_max} 字，当前 ${commentLen} 字`);
+    if (!allCommentsOk) {
+      message.warning(blockingComment ? `${blockingComment.label}点评${blockingComment.hint}` : `每个维度都要写点评（${dimMin}~${dimMax} 字）`);
       return;
     }
-    submit.mutate({
-      client_submit_id: crypto.randomUUID(),
+    send({
       kind: "score",
       scores,
-      comment,
+      dim_comments: dimComments,
       duration_ms: Date.now() - startedAt.current,
     });
   }
@@ -152,16 +193,22 @@ export default function AnnotatePage() {
   const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
 
   function go(target?: ImageDTO) {
-    if (!target) return;
+    if (!target || submitting.current) return;
     if (dirty) {
-      Modal.confirm({
+      const confirm = Modal.confirm({
         title: "当前标注还没提交",
         content: "切换前会把当前内容保存为草稿（仅你可见）。",
         okText: "保存草稿并切换",
         cancelText: "留在本页",
-        onOk: async () => {
-          await saveDraft({ kind: "score", scores, comment });
-          nav(`/workbench/${target.id}`);
+        onOk: (close) => {
+          clearTimeout(draftTimer.current);
+          confirm.update({ okButtonProps: { loading: true }, cancelButtonProps: { disabled: true } });
+          saveDraft({ kind: "score", scores, dim_comments: dimComments }).then(() => {
+            close();
+            nav(`/workbench/${target.id}`);
+          }).catch((e) => {
+            message.error(e instanceof ApiError ? e.message : "草稿保存失败，请重试");
+          }).finally(() => confirm.update({ okButtonProps: { loading: false }, cancelButtonProps: { disabled: false } }));
         },
       });
     } else {
@@ -171,6 +218,7 @@ export default function AnnotatePage() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented || excOpen || helpOpen || exampleOpen) return;
       const el = e.target as HTMLElement;
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName);
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -229,10 +277,10 @@ export default function AnnotatePage() {
         </Space>
         <Space>
           <Tooltip title="上一张 (←)">
-            <Button icon={<ArrowLeftOutlined />} disabled={!prev} onClick={() => go(prev)} />
+            <Button aria-label="上一张" icon={<ArrowLeftOutlined />} disabled={!prev || submit.isPending} onClick={() => go(prev)} />
           </Tooltip>
           <Tooltip title="下一张 (→)">
-            <Button icon={<ArrowRightOutlined />} disabled={!next} onClick={() => go(next)} />
+            <Button aria-label="下一张" icon={<ArrowRightOutlined />} disabled={!next || submit.isPending} onClick={() => go(next)} />
           </Tooltip>
           <Button icon={<BookOutlined />} onClick={() => setExampleOpen(true)}>
             查看示例
@@ -243,7 +291,7 @@ export default function AnnotatePage() {
 
       <div className="annotate-body">
         <Card className="canvas-card" styles={{ body: { padding: 0, display: "flex", flex: 1 } }}>
-          <ImageViewer src={image.preview_url} alt={image.stored_name} resetKey={image.id} />
+          <ImageViewer src={image.original_url || image.preview_url} alt={image.stored_name} resetKey={image.id} />
         </Card>
 
         <div className="panel-card">
@@ -297,55 +345,76 @@ export default function AnnotatePage() {
 
           <div style={{ marginTop: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <b>点评</b>
+              <b>点评（每个维度各写一条）</b>
               <Space size={8}>
-                <span style={{ fontSize: 12, color: commentOk ? "#7b8598" : "#cf1322" }}>
-                  {commentLen} / {rubric.comment_max}
-                </span>
-                <Dropdown
-                  menu={{
-                    items: (me?.comment_templates ?? []).map((t, i) => ({ key: String(i), label: t })),
-                    onClick: ({ key }) => {
-                      const tpl = me?.comment_templates?.[Number(key)];
-                      if (tpl) {
-                        setComment((c) => (c ? c.replace(/。?$/, "。") + tpl : tpl));
-                        setDirty(true);
-                      }
-                    },
-                  }}
-                >
-                  <Button size="small">常用评语 ▾</Button>
-                </Dropdown>
+                <span style={{ fontSize: 12, color: "#7b8598" }}>{dimMin}~{dimMax} 字/维</span>
               </Space>
             </div>
-            <Input.TextArea
-              rows={2}
-              maxLength={rubric.comment_max}
-              value={comment}
-              placeholder={`指出具体维度的具体问题，${rubric.comment_min}~${rubric.comment_max} 字`}
-              data-test="comment"
-              onChange={(e) => {
-                setComment(e.target.value);
-                setDirty(true);
-              }}
-            />
+            <div className="dim-comment-list">
+              {commentStates.map((s) => (
+                <div className="dim-comment-row" key={s.key} data-dim-comment={s.key}>
+                  <div style={{ width: 100, fontSize: 13, color: "#44506a", flex: "0 0 auto" }}>
+                    <div>{s.label} · {scores[s.key] ?? "—"}/{rubric.dims.find((d) => d.key === s.key)?.max}</div>
+                    <Dropdown
+                      menu={{
+                        items: (me?.comment_templates ?? []).map((text, i) => ({ key: String(i), label: text })),
+                        onClick: ({ key }) => {
+                          const text = me?.comment_templates?.[Number(key)];
+                          if (!text) return;
+                          setDimComments((prev) => {
+                            const current = prev[s.key] ?? "";
+                            return { ...prev, [s.key]: current ? current.replace(/。?$/, "。") + text : text };
+                          });
+                          setDirty(true);
+                        },
+                      }}
+                    >
+                      <Button size="small" type="link" aria-label={`${s.label}常用评语`}>常用评语 ▾</Button>
+                    </Dropdown>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Input.TextArea
+                      rows={1}
+                      maxLength={dimMax}
+                      value={dimComments[s.key] ?? ""}
+                      placeholder={`写清这一维的问题，${dimMin}~${dimMax} 字`}
+                      data-test={`dim-comment-${s.key}`}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setDimComments((prev) => ({ ...prev, [s.key]: v }));
+                        setDirty(true);
+                      }}
+                    />
+                    <div
+                      data-test={`dim-comment-hint-${s.key}`}
+                      style={{ fontSize: 11, marginTop: 2, color: s.ok ? "#7b8598" : "#cf1322" }}
+                    >
+                      {s.hint}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
 
           </div>
 
           <div className="panel-footer" style={{ display: "flex", gap: 8 }}>
-            <Button
-              type="primary"
-              size="large"
-              style={{ flex: 1 }}
-              icon={<SendOutlined />}
-              loading={submit.isPending}
-              disabled={!complete || !commentOk}
-              onClick={doSubmit}
-              data-test="submit"
-            >
-              提交并下一张
-            </Button>
+            <Tooltip title={submitBlockedReason || "提交并自动进入下一张（⌘/Ctrl + Enter）"}>
+              <span style={{ flex: 1, display: "inline-flex" }}>
+                <Button
+                  type="primary"
+                  size="large"
+                  style={{ width: "100%" }}
+                  icon={<SendOutlined />}
+                  loading={submit.isPending}
+                  onClick={doSubmit}
+                  data-test="submit"
+                >
+                  提交并下一张
+                </Button>
+              </span>
+            </Tooltip>
             <Tooltip title="这张图不能打分时使用（E）">
               <Button
                 danger
@@ -367,8 +436,7 @@ export default function AnnotatePage() {
         loading={submit.isPending}
         onCancel={() => setExcOpen(false)}
         onSubmit={(reasons, note) =>
-          submit.mutate({
-            client_submit_id: crypto.randomUUID(),
+          send({
             kind: "exception",
             exception_reasons: reasons,
             exception_note: note,

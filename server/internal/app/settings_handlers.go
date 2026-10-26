@@ -61,6 +61,8 @@ func (s *Server) handleCreateRubric(c *gin.Context) {
 		Bands         []score.Band `json:"grade_bands"`
 		CommentMin    int          `json:"comment_min"`
 		CommentMax    int          `json:"comment_max"`
+		DimCommentMin int          `json:"dim_comment_min"`
+		DimCommentMax int          `json:"dim_comment_max"`
 		AllowOverride bool         `json:"allow_total_override"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
@@ -93,6 +95,15 @@ func (s *Server) handleCreateRubric(c *gin.Context) {
 	if in.CommentMax <= in.CommentMin {
 		in.CommentMax = in.CommentMin + 30
 	}
+	if in.DimCommentMin <= 0 {
+		in.DimCommentMin = 10
+	}
+	if in.DimCommentMax <= 0 {
+		in.DimCommentMax = 50
+	}
+	if in.DimCommentMax < in.DimCommentMin {
+		fields["dim_comment_max"] = "每维点评上限不能小于下限"
+	}
 	if len(fields) > 0 {
 		httpx.Fail(c, httpx.Validation(fields, "评分方案校验失败"))
 		return
@@ -101,9 +112,9 @@ func (s *Server) handleCreateRubric(c *gin.Context) {
 	bandsJSON, _ := json.Marshal(in.Bands)
 	var id int64
 	err := s.pool().QueryRow(c.Request.Context(),
-		`INSERT INTO rubrics (name, dims, grade_bands, comment_min, comment_max, allow_total_override, is_active)
-		 VALUES ($1,$2::jsonb,$3::jsonb,$4,$5,$6,false) RETURNING id`,
-		in.Name, dimsJSON, bandsJSON, in.CommentMin, in.CommentMax, in.AllowOverride).Scan(&id)
+		`INSERT INTO rubrics (name, dims, grade_bands, comment_min, comment_max, allow_total_override, dim_comment_min, dim_comment_max, is_active)
+		 VALUES ($1,$2::jsonb,$3::jsonb,$4,$5,$6,$7,$8,false) RETURNING id`,
+		in.Name, dimsJSON, bandsJSON, in.CommentMin, in.CommentMax, in.AllowOverride, in.DimCommentMin, in.DimCommentMax).Scan(&id)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -180,6 +191,13 @@ func (s *Server) handlePutSetting(c *gin.Context) {
 		httpx.Fail(c, httpx.BadRequest("配置值必须是合法 JSON"))
 		return
 	}
+	if key == "max_file_mb" {
+		var limit *int
+		if json.Unmarshal(body, &limit) != nil || limit == nil || *limit < 0 || *limit > 1024 {
+			httpx.Fail(c, httpx.Validation(map[string]string{"max_file_mb": "请输入 0~1024 的整数"}, "图片大小上限必须为 0~1024 的整数"))
+			return
+		}
+	}
 	_, err = s.pool().Exec(c.Request.Context(),
 		`INSERT INTO settings (key, value, updated_at) VALUES ($1,$2::jsonb,now())
 		 ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`, key, body)
@@ -206,12 +224,12 @@ func (s *Server) handleAuditLogs(c *gin.Context) {
 	items := []gin.H{}
 	for rows.Next() {
 		var (
-			id         int64
-			who, act   string
-			typ        string
-			targetID   int64
-			detail     string
-			createdAt  any
+			id        int64
+			who, act  string
+			typ       string
+			targetID  int64
+			detail    string
+			createdAt any
 		)
 		if err := rows.Scan(&id, &who, &act, &typ, &targetID, &detail, &createdAt); err != nil {
 			httpx.Fail(c, err)

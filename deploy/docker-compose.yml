@@ -30,7 +30,7 @@ services:
       ADMIN_INIT_PASSWORD: ${ADMIN_INIT_PASSWORD:?set ADMIN_INIT_PASSWORD in deploy/.env}
       ACCESS_TTL_HOURS: "12"
       MEDIA_SIGN_TTL_MIN: "60"
-      MAX_FILE_MB: "20"
+      MAX_FILE_MB: "10"
       MAX_HOLD_PER_USER: "100"
       LOCK_TTL_HOURS: "24"
       WORKER_IN_API: "true"

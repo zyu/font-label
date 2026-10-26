@@ -13,8 +13,8 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 	ctx := c.Request.Context()
 	var (
 		unassigned, assigned, submitted, approved, rejected, excluded, total int
-		todayUpload, todaySubmit, todayReview, todayReject                  int
-		avgTotal, rejectRate                                                float64
+		todayUpload, todaySubmit, todayReview, todayReject                   int
+		avgTotal, rejectRate                                                 float64
 	)
 	err := s.pool().QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status='unassigned'),
@@ -98,13 +98,13 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 	items := []gin.H{}
 	for rows.Next() {
 		var (
-			id                                    int64
-			name, status                          string
-			claimTimes, granted, submitted        int
-			approved, rejected, pending, holding  int
-			avgTotal                              float64
-			avgMS, exceptions, firstPass          int
-			reviewed, rejectEvents                int
+			id                                   int64
+			name, status                         string
+			claimTimes, granted, submitted       int
+			approved, rejected, pending, holding int
+			avgTotal                             float64
+			avgMS, exceptions, firstPass         int
+			reviewed, rejectEvents               int
 		)
 		if err := rows.Scan(&id, &name, &status, &claimTimes, &granted, &submitted, &approved,
 			&rejected, &pending, &holding, &avgTotal, &avgMS, &exceptions,

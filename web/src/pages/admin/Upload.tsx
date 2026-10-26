@@ -4,6 +4,7 @@ import { InboxOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { FolderDTO } from "../../api/types";
+import { useAuth } from "../../auth";
 
 interface UploadItem {
   file: string;
@@ -19,6 +20,8 @@ interface UploadItem {
 
 export default function UploadPage() {
   const qc = useQueryClient();
+  const { me } = useAuth();
+  const maxFileMB = me?.limits.max_file_mb ?? 10;
   const [files, setFiles] = useState<File[]>([]);
   const [folderId, setFolderId] = useState<number | undefined>();
   const [folderName, setFolderName] = useState("");
@@ -34,6 +37,11 @@ export default function UploadPage() {
   async function doUpload() {
     if (files.length === 0) {
       message.warning("请先选择图片");
+      return;
+    }
+    const oversized = files.find((file) => file.size > maxFileMB * 1024 * 1024);
+    if (oversized) {
+      message.warning(`${oversized.name}：单张不能超过 ${maxFileMB}MB`);
       return;
     }
     const form = new FormData();
@@ -116,7 +124,7 @@ export default function UploadPage() {
             <InboxOutlined />
           </p>
           <p className="ant-upload-text">点击或拖拽图片 / 整个文件夹到这里</p>
-          <p className="ant-upload-hint">支持 jpg / png / webp / gif，单张 ≤ 20MB</p>
+          <p className="ant-upload-hint">支持 jpg / png / webp / gif，单张 ≤ {maxFileMB}MB</p>
         </Upload.Dragger>
 
         <Space style={{ marginTop: 14 }}>

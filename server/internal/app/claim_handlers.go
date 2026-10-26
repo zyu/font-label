@@ -82,9 +82,14 @@ func (s *Server) handleClaim(c *gin.Context) {
 		return
 	}
 
+	// 文件夹模式也是「领到持有上限为止」：整包领取不能绕过 max_hold_per_user
 	limit := in.Count
 	if in.Mode == "folder" {
-		limit = 100000
+		limit = maxHold - hold
+		if limit <= 0 {
+			httpx.Fail(c, httpx.LimitExceeded("你已持有 "+itoa(hold)+" 个未完成任务（上限 "+itoa(maxHold)+"），请先完成或放弃"))
+			return
+		}
 	}
 	var claimed []claimedImage
 	var claimID int64
@@ -148,11 +153,11 @@ func (s *Server) handleClaim(c *gin.Context) {
 		})
 	}
 	httpx.OK(c, gin.H{
-		"granted":            len(claimed),
-		"requested":          in.Count,
-		"remaining_in_pool":  remaining,
-		"images":             out,
-		"hold":               gin.H{"current": hold + len(claimed), "limit": maxHold},
+		"granted":           len(claimed),
+		"requested":         in.Count,
+		"remaining_in_pool": remaining,
+		"images":            out,
+		"hold":              gin.H{"current": hold + len(claimed), "limit": maxHold},
 	})
 }
 

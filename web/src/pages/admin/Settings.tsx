@@ -32,7 +32,7 @@ export default function SettingsPage() {
   const [templates, setTemplates] = useState("");
   const [reasons, setReasons] = useState("");
   const [weights, setWeights] = useState<Record<string, number>>({});
-  const [commentMin, setCommentMin] = useState(20);
+  const [commentMin, setCommentMin] = useState(10);
   const [commentMax, setCommentMax] = useState(50);
   const [saving, setSaving] = useState(false);
 
@@ -47,8 +47,8 @@ export default function SettingsPage() {
     const w: Record<string, number> = {};
     rubric.data.dims.forEach((d) => (w[d.key] = d.weight));
     setWeights(w);
-    setCommentMin(rubric.data.comment_min);
-    setCommentMax(rubric.data.comment_max);
+    setCommentMin(rubric.data.dim_comment_min ?? 10);
+    setCommentMax(rubric.data.dim_comment_max ?? 50);
   }, [rubric.data]);
 
   useEffect(() => {
@@ -82,8 +82,10 @@ export default function SettingsPage() {
         name: `${rubric.data.name.replace(/（.*）$/, "")}（自定义 ${new Date().toLocaleDateString("zh-CN")}）`,
         dims: rubric.data.dims.map((d) => ({ ...d, weight: weights[d.key] })),
         grade_bands: rubric.data.grade_bands,
-        comment_min: commentMin,
-        comment_max: commentMax,
+        comment_min: rubric.data.comment_min,
+        comment_max: rubric.data.comment_max,
+        dim_comment_min: commentMin,
+        dim_comment_max: commentMax,
         allow_total_override: rubric.data.allow_total_override,
       };
       const created = await api.post<{ id: number }>("/rubrics", body);
@@ -137,8 +139,8 @@ export default function SettingsPage() {
           ]}
         />
         <Space style={{ marginTop: 12 }} wrap>
-          <span>点评字数下限</span>
-          <InputNumber min={1} max={200} value={commentMin} onChange={(v) => setCommentMin(Number(v ?? 20))} />
+          <span>每维评语字数下限</span>
+          <InputNumber min={1} max={200} value={commentMin} onChange={(v) => setCommentMin(Number(v ?? 10))} />
           <span>上限</span>
           <InputNumber min={10} max={500} value={commentMax} onChange={(v) => setCommentMax(Number(v ?? 50))} />
           <Typography.Text type="secondary">等级线：优秀 ≥90 / 良好 80~89 / 中等 60~79 / 较差 &lt;60</Typography.Text>

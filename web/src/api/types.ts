@@ -28,8 +28,12 @@ export interface Rubric {
   name: string;
   dims: Dim[];
   grade_bands: Band[];
+  /** 旧：单条总点评的字数范围（保留兼容，界面已改为按维度点评） */
   comment_min: number;
   comment_max: number;
+  /** 每个维度的点评字数范围（现行：10~50 字） */
+  dim_comment_min: number;
+  dim_comment_max: number;
   allow_total_override: boolean;
 }
 
@@ -80,6 +84,8 @@ export interface ImageDTO {
   grade: string;
   comment: string;
   scores: Record<string, number>;
+  /** 五维各自的点评：{ white: "...", black: "..." } */
+  dim_comments: Record<string, string>;
   exception_reasons: string[];
   duration_ms: number | null;
   claimed_at: string | null;
@@ -108,6 +114,8 @@ export interface ImageDetail {
 
 export interface Draft {
   scores?: Record<string, number>;
+  /** 五维各自的点评 */
+  dim_comments?: Record<string, string>;
   comment?: string;
   kind?: "score" | "exception";
   exception_reasons?: string[];

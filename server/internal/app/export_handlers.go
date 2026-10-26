@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/xuri/excelize/v2"
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
@@ -26,8 +27,8 @@ type exportFilters struct {
 	Annotators []int64 `json:"annotators"`
 	From       string  `json:"from"`
 	To         string  `json:"to"`
-	Status     string  `json:"status"`      // approved | reviewed | all
-	DateField  string  `json:"date_field"`  // created | submitted
+	Status     string  `json:"status"`     // approved | reviewed | all
+	DateField  string  `json:"date_field"` // created | submitted
 }
 
 type exportRow struct {
@@ -39,20 +40,23 @@ type exportRow struct {
 	Annotator  string
 	Submitted  *time.Time
 	Scores     map[string]int
-	Total      *float64
-	Grade      string
-	Comment    string
-	Status     string
-	Reviewer   string
-	ReviewedAt *time.Time
-	RejectNum  int
-	Exceptions string
-	RelPath    string
+	// 五维各自的点评
+	DimComments map[string]string
+	Total       *float64
+	Grade       string
+	Comment     string
+	Status      string
+	Reviewer    string
+	ReviewedAt  *time.Time
+	RejectNum   int
+	Exceptions  string
+	RelPath     string
 }
 
 const exportSelect = `
 SELECT f.name, i.stored_name, i.orig_name, i.seq, COALESCE(u.display_name,''),
-       i.submitted_at, COALESCE(a.scores::text,'{}'), a.total, COALESCE(a.grade,''),
+       i.submitted_at, COALESCE(a.scores::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
+       a.total, COALESCE(a.grade,''),
        COALESCE(a.comment,''), i.status, COALESCE(rv.display_name,''), i.reviewed_at,
        i.reject_count, COALESCE(array_to_string(a.exception_reasons, '、'),''), i.rel_path,
        i.folder_id
@@ -64,6 +68,28 @@ SELECT f.name, i.stored_name, i.orig_name, i.seq, COALESCE(u.display_name,''),
         SELECT u2.display_name
           FROM reviews r JOIN users u2 ON u2.id = r.reviewer_id
          WHERE r.image_id = i.id ORDER BY r.created_at DESC LIMIT 1) rv ON true`
+
+func scanExportRow(rows pgx.Rows) (exportRow, error) {
+	var r exportRow
+	var scores, dimComments string
+	var total *float64
+	var submitted, reviewed *time.Time
+	if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
+		&submitted, &scores, &dimComments, &total, &r.Grade, &r.Comment, &r.Status, &r.Reviewer,
+		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID); err != nil {
+		return r, err
+	}
+	r.Submitted, r.ReviewedAt, r.Total = submitted, reviewed, total
+	r.Scores = map[string]int{}
+	if scores != "" {
+		_ = json.Unmarshal([]byte(scores), &r.Scores)
+	}
+	r.DimComments = map[string]string{}
+	if dimComments != "" && dimComments != "null" {
+		_ = json.Unmarshal([]byte(dimComments), &r.DimComments)
+	}
+	return r, nil
+}
 
 func (f exportFilters) where() (string, []any) {
 	clause := " i.id > 0"
@@ -108,19 +134,9 @@ func (s *Server) exportRows(c *gin.Context, f exportFilters) ([]exportRow, error
 	defer rows.Close()
 	out := []exportRow{}
 	for rows.Next() {
-		var r exportRow
-		var scores string
-		var total *float64
-		var submitted, reviewed *time.Time
-		if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
-			&submitted, &scores, &total, &r.Grade, &r.Comment, &r.Status, &r.Reviewer,
-			&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID); err != nil {
+		r, err := scanExportRow(rows)
+		if err != nil {
 			return nil, err
-		}
-		r.Submitted, r.ReviewedAt, r.Total = submitted, reviewed, total
-		r.Scores = map[string]int{}
-		if scores != "" {
-			_ = json.Unmarshal([]byte(scores), &r.Scores)
 		}
 		out = append(out, r)
 	}
@@ -266,11 +282,14 @@ func assistantContent(r exportRow, dims []score.Dim, labels map[string]string) (
 		if max <= 0 {
 			max = 20
 		}
-		fmt.Fprintf(&b, "%s：%d/%d\n", d.Label, v, max)
+		fmt.Fprintf(&b, "%s：%d/%d", d.Label, v, max)
+		if text := strings.TrimSpace(r.DimComments[d.Key]); text != "" {
+			fmt.Fprintf(&b, "；点评：%s", text)
+		}
+		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "总分：%s/100\n", strconv.FormatFloat(*r.Total, 'f', -1, 64))
-	fmt.Fprintf(&b, "档位：%s\n", r.Grade)
-	fmt.Fprintf(&b, "总评：%s", strings.TrimSpace(r.Comment))
+	fmt.Fprintf(&b, "档位：%s", r.Grade)
 	return b.String(), true
 }
 
@@ -313,16 +332,16 @@ var baseHeaders = []string{
 }
 
 var tailHeaders = []string{
-	"总分", "等级", "点评",
+	"总分", "等级",
 	"状态", "审核员", "审核时间", "驳回次数", "异常原因", "图片相对路径",
 }
 
-// exportHeaders 把评分维度插在中间：维度由当前启用的方案决定（现行为五维各 20 分）
+// exportHeaders 每个维度占两列：分数 + 该维度的点评（现行为五维各 20 分、各 10~50 字点评）
 func exportHeaders(dims []score.Dim) []string {
-	out := make([]string, 0, len(baseHeaders)+len(dims)+len(tailHeaders))
+	out := make([]string, 0, len(baseHeaders)+2*len(dims)+len(tailHeaders))
 	out = append(out, baseHeaders...)
 	for _, d := range dims {
-		out = append(out, d.Label)
+		out = append(out, d.Label, d.Label+"点评")
 	}
 	return append(out, tailHeaders...)
 }
@@ -354,9 +373,10 @@ func rowValues(r exportRow, dims []score.Dim) []string {
 		} else {
 			out = append(out, "")
 		}
+		out = append(out, r.DimComments[d.Key])
 	}
 	out = append(out,
-		num(r.Total), r.Grade, r.Comment, statusLabel, r.Reviewer, tm(r.ReviewedAt),
+		num(r.Total), r.Grade, statusLabel, r.Reviewer, tm(r.ReviewedAt),
 		strconv.Itoa(r.RejectNum), r.Exceptions, r.RelPath,
 	)
 	return out
@@ -398,9 +418,15 @@ func renderXLSX(rows []exportRow, dims []score.Dim) ([]byte, error) {
 	}
 	_ = f.SetColWidth(sheet, "A", "A", 16)
 	_ = f.SetColWidth(sheet, "B", "C", 22)
-	// 点评列：基础列 6 + 维度数 + 3（总分/等级/点评）
-	commentCol, _ := excelize.ColumnNumberToName(6 + len(dims) + 3)
-	_ = f.SetColWidth(sheet, commentCol, commentCol, 48)
+	// 每个维度占两列（分数、点评）：分数列窄，点评列宽
+	for i := range dims {
+		if name, err := excelize.ColumnNumberToName(7 + 2*i); err == nil {
+			_ = f.SetColWidth(sheet, name, name, 9)
+		}
+		if name, err := excelize.ColumnNumberToName(8 + 2*i); err == nil {
+			_ = f.SetColWidth(sheet, name, name, 40)
+		}
+	}
 	_ = f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"})
 
 	var buf bytes.Buffer
@@ -432,7 +458,8 @@ func renderJSON(rows []exportRow) ([]byte, error) {
 		items = append(items, gin.H{
 			"folder": r.Folder, "stored_name": r.StoredName, "orig_name": r.OrigName,
 			"seq": r.Seq, "annotator": r.Annotator, "submitted_at": r.Submitted,
-			"scores": r.Scores, "total": r.Total, "grade": r.Grade, "comment": r.Comment,
+			"scores": r.Scores, "dim_comments": r.DimComments,
+			"total": r.Total, "grade": r.Grade, "comment": r.Comment,
 			"status": r.Status, "reviewer": r.Reviewer, "reviewed_at": r.ReviewedAt,
 			"reject_count": r.RejectNum, "exception_reasons": r.Exceptions,
 			"rel_path": r.RelPath,
@@ -544,19 +571,9 @@ func (s *Server) runExportJob(jobID int64, userID int64, format string, filtersJ
 	defer rows.Close()
 	out := []exportRow{}
 	for rows.Next() {
-		var r exportRow
-		var scores string
-		var total *float64
-		var submitted, reviewed *time.Time
-		if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
-			&submitted, &scores, &total, &r.Grade, &r.Comment, &r.Status, &r.Reviewer,
-			&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID); err != nil {
+		r, err := scanExportRow(rows)
+		if err != nil {
 			return err
-		}
-		r.Submitted, r.ReviewedAt, r.Total = submitted, reviewed, total
-		r.Scores = map[string]int{}
-		if scores != "" {
-			_ = json.Unmarshal([]byte(scores), &r.Scores)
 		}
 		out = append(out, r)
 	}

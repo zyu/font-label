@@ -174,9 +174,9 @@ func (s *Server) handleHistory(c *gin.Context) {
 	versions := []gin.H{}
 	for rows.Next() {
 		var (
-			ver       int
-			who, raw  string
-			at        time.Time
+			ver      int
+			who, raw string
+			at       time.Time
 		)
 		if err := rows.Scan(&ver, &who, &raw, &at); err != nil {
 			httpx.Fail(c, err)
