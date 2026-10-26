@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import ScorePanel, { DIM_HINTS, clampScore, computeTotal } from "../ScorePanel";
 import type { Dim } from "../../api/types";
@@ -11,6 +12,15 @@ const DIMS: Dim[] = [
   { key: "structure", label: "结构", weight: 0.2, max: 20, step: 5 },
   { key: "control", label: "控笔", weight: 0.2, max: 20, step: 5 },
 ];
+
+function ControlledScores() {
+  const [scores, setScores] = useState<Record<string, number>>({});
+  return <ScorePanel dims={DIMS} value={scores} hotkeyDim={null}
+    onPick={(key, score) => setScores((current) => ({ ...current, [key]: score }))} />;
+}
+
+beforeEach(() => vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} }));
+afterEach(() => vi.unstubAllGlobals());
 
 describe("computeTotal（五维百分制）", () => {
   it("每维 20 分时总分就是直接相加", () => {
@@ -64,14 +74,61 @@ describe("ScorePanel（滑杆 + 数字框）", () => {
     expect(inputs[0].placeholder).toBe("—");
   });
 
-  it("在数字框里键入 15 会上报该维度；键入 17 会被对齐成 15", () => {
-    const onPick = vi.fn();
-    render(<ScorePanel dims={DIMS} value={{}} onPick={onPick} hotkeyDim={null} />);
-    const input = screen.getAllByRole("spinbutton")[0];
-    fireEvent.change(input, { target: { value: "15" } });
-    expect(onPick.mock.calls.at(-1)).toEqual(["white", 15]);
+  it.each(["10", "15", "20"])("逐字键入 %s 不会提前吸附第一位", (target) => {
+    render(<ControlledScores />);
+    const input = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.focus(input);
+    for (const char of target) {
+      fireEvent.change(input, { target: { value: input.value + char } });
+    }
+    expect(input.value).toBe(target);
+    fireEvent.blur(input);
+    expect(input.value).toBe(target);
+  });
+
+  it("17 在编辑时保留原值，失焦后才吸附成 15", () => {
+    render(<ControlledScores />);
+    const input = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "17" } });
-    expect(onPick.mock.calls.at(-1)).toEqual(["white", 15]);
+    expect(input.value).toBe("17");
+    fireEvent.blur(input);
+    expect(input.value).toBe("15");
+  });
+
+  it("18 在按回车后吸附成 20", () => {
+    render(<ControlledScores />);
+    const input = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "18" } });
+    expect(input.value).toBe("18");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("20");
+  });
+
+  it("未编辑过的分数框失焦仍为空", () => {
+    render(<ControlledScores />);
+    const input = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.blur(input);
+    expect(input.value).toBe("");
+  });
+
+  it("粘贴整数和方向键仍能按 5 分档调整", () => {
+    render(<ControlledScores />);
+    const input = screen.getAllByRole("spinbutton")[0] as HTMLInputElement;
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "15" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.value).toBe("10");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.value).toBe("15");
+  });
+
+  it("滑杆仍即时按 5 分档更新数字框", () => {
+    render(<ControlledScores />);
+    fireEvent.keyDown(screen.getAllByRole("slider")[0], { key: "ArrowRight", keyCode: 39, which: 39 });
+    expect((screen.getAllByRole("spinbutton")[0] as HTMLInputElement).value).toBe("5");
   });
 
   it("非档位值会被对齐到最近的 5 分档", () => {

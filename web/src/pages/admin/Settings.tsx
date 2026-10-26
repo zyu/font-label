@@ -69,6 +69,17 @@ export default function SettingsPage() {
     }
   }
 
+  function saveJsonSetting(key: string, raw: string) {
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      message.error("JSON 格式错误");
+      return;
+    }
+    return putSetting(key, value);
+  }
+
   async function saveRubric() {
     if (!rubric.data) return;
     const sum = Object.values(weights).reduce((a, b) => a + b, 0);
@@ -149,12 +160,12 @@ export default function SettingsPage() {
 
       <Row gutter={14}>
         <Col span={12}>
-          <Card size="small" title="常用评语（JSON 数组）" extra={<a onClick={() => putSetting("comment_templates", JSON.parse(templates))}>保存</a>}>
+          <Card size="small" title="常用评语（JSON 数组）" extra={<a onClick={() => saveJsonSetting("comment_templates", templates)}>保存</a>}>
             <Input.TextArea rows={8} value={templates} onChange={(e) => setTemplates(e.target.value)} />
           </Card>
         </Col>
         <Col span={12}>
-          <Card size="small" title="异常原因（JSON 数组，key + label）" extra={<a onClick={() => putSetting("exception_reasons", JSON.parse(reasons))}>保存</a>}>
+          <Card size="small" title="异常原因（JSON 数组，key + label）" extra={<a onClick={() => saveJsonSetting("exception_reasons", reasons)}>保存</a>}>
             <Input.TextArea rows={8} value={reasons} onChange={(e) => setReasons(e.target.value)} />
           </Card>
         </Col>

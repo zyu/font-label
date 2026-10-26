@@ -1,5 +1,7 @@
 const BASE = "/api/v1";
 
+type ExportFileResult = { blob: Blob; jobId?: never } | { jobId: number; blob?: never };
+
 export class ApiError extends Error {
   code: string;
   status: number;
@@ -62,19 +64,26 @@ export const api = {
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
   upload: async (form: FormData) => request<any>("/upload", { method: "POST", body: form }),
   /** Download an export; returns either a Blob or a job descriptor. */
-  exportFile: async (body: unknown): Promise<{ blob?: Blob; jobId?: number }> => {
+  exportFile: async (body: unknown): Promise<ExportFileResult> => {
     const headers = new Headers({ "Content-Type": "application/json" });
     const token = getToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const res = await fetch(BASE + "/exports", { method: "POST", headers, body: JSON.stringify(body) });
-    const ct = res.headers.get("Content-Type") || "";
     if (!res.ok) {
       const payload = await res.json().catch(() => null);
       throw new ApiError(res.status, payload?.error?.code || "HTTP", payload?.error?.message || "导出失败");
     }
-    if (ct.includes("application/json")) {
-      const payload = await res.json();
-      return { jobId: payload?.data?.job_id };
+    const attachment = /^\s*attachment(?:\s*;|\s*$)/i.test(res.headers.get("Content-Disposition") || "");
+    const ct = (res.headers.get("Content-Type") || "").toLowerCase();
+    // JSON exports and task descriptors share a MIME type. An attachment is a
+    // file; existing servers return HTTP 200 with async=true for queued jobs.
+    if (!attachment && (res.status === 202 || ct.includes("application/json"))) {
+      const payload = await res.json().catch(() => null);
+      const jobId = payload?.data?.job_id;
+      if ((res.status === 202 || payload?.data?.async === true) && Number.isSafeInteger(jobId) && jobId > 0) {
+        return { jobId };
+      }
+      throw new ApiError(res.status, "INVALID_EXPORT_RESPONSE", "导出响应格式异常，请重试");
     }
     return { blob: await res.blob() };
   },

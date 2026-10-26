@@ -60,6 +60,7 @@ function AnnotationEditor({ id }: { id: number }) {
   const [excOpen, setExcOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
+  const [shortcutSubmit, setShortcutSubmit] = useState(false);
   const [initialized, setInitialized] = useState<number | null>(null);
   const startedAt = useRef<number>(Date.now());
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -187,6 +188,14 @@ function AnnotationEditor({ id }: { id: number }) {
     });
   }
 
+  // InputNumber commits its value on Enter in the same event as the shortcut.
+  // Submit after React has applied that update, so we use the final score.
+  useEffect(() => {
+    if (!shortcutSubmit) return;
+    setShortcutSubmit(false);
+    doSubmit();
+  });
+
   const list = queue.data ?? [];
   const idx = list.findIndex((x) => x.id === id);
   const prev = idx > 0 ? list[idx - 1] : undefined;
@@ -223,7 +232,7 @@ function AnnotationEditor({ id }: { id: number }) {
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName);
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
-        doSubmit();
+        setShortcutSubmit(true);
         return;
       }
       if (typing) return;

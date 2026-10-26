@@ -9,15 +9,17 @@ import AnnotatePage from "../Annotate";
 
 const dims = ["white", "black", "variation", "structure", "control"].map((key) => ({ key, label: key, weight: 0.2, max: 20, step: 5 }));
 const comments = Object.fromEntries(dims.map((d) => [d.key, `${d.key}：撇捺左右空白大致匀，重心稳定。`]));
+let showScorePanel = false;
 const scores = Object.fromEntries(dims.map((d) => [d.key, 20]));
 const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: ["撇捺左右空白大致匀，重心稳定。"], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
 vi.mock("../../auth", () => ({ useAuth: () => ({ me }) }));
 vi.mock("../../components/ExampleDrawer", () => ({ default: () => null }));
 vi.mock("../../components/ImageViewer", () => ({ default: ({ src }: { src: string }) => <img src={src} alt="标注原图" /> }));
-vi.mock("../../components/ScorePanel", async (original) => ({
-  ...(await original<typeof import("../../components/ScorePanel")>()),
-  default: () => null,
-}));
+vi.mock("../../components/ScorePanel", async (original) => {
+  const module = await original<typeof import("../../components/ScorePanel")>();
+  const ActualScorePanel = module.default;
+  return { ...module, default: (props: Parameters<typeof ActualScorePanel>[0]) => showScorePanel ? <ActualScorePanel {...props} /> : null };
+});
 
 function detail(id: number, filled = true): ImageDetail {
   return { image: { id, scores: filled ? scores : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
@@ -36,6 +38,7 @@ function mount(filled = true) {
 }
 
 beforeEach(() => {
+  showScorePanel = false;
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   const getComputedStyle = window.getComputedStyle.bind(window);
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => getComputedStyle(element));
@@ -133,6 +136,37 @@ describe("标注交互回归", () => {
     fireEvent.click(screen.getByRole("button", { name: "上一张" }));
     await screen.findByText("test1.png");
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue("最新的评语，切图后仍要保留完整。");
+  });
+
+  it("D01：HTTP 环境下异常上报成功后有提示并返回工作台", async () => {
+    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: /异常/ }));
+    fireEvent.click(await screen.findByLabelText("图片模糊"));
+    fireEvent.click(screen.getByRole("button", { name: "提交异常" }));
+    await screen.findByText("工作台");
+    expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "exception", client_submit_id: expect.stringMatching(/^[\da-f-]{36}$/) }));
+    expect(message.success).toHaveBeenCalledWith("已提交，等待审核");
+  });
+
+  it("D01：提交标识生成失败也能显示错误，不会静默无反应", async () => {
+    vi.stubGlobal("crypto", { getRandomValues: () => { throw new Error("测试：浏览器随机数接口不可用"); } });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    await waitFor(() => expect(message.error).toHaveBeenCalledWith("测试：浏览器随机数接口不可用"));
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it.each([["17", 15], ["26", 20]])("数字框输入 %s 后直接快捷键提交会带上最终档位 %s", async (typed, expected) => {
+    showScorePanel = true;
+    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+    mount();
+    const input = screen.getAllByRole("spinbutton")[0];
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "10" } });
+    fireEvent.change(input, { target: { value: typed } });
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ scores: { ...scores, white: expected } })));
   });
 
   it("标注使用原图保证放大细节", () => {

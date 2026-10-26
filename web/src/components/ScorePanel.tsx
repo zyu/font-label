@@ -51,6 +51,10 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
         const hint = DIM_HINTS[d.key] ?? "";
         const max = d.max || 20;
         const step = stepOf(d);
+        const commit = (input: number | string | null) => {
+          const next = clampScore(input, max, step) ?? clampScore(cur, max, step);
+          if (next !== null) onPick(d.key, next);
+        };
         return (
           <div className="score-row" key={d.key} data-dim={d.key}>
             <div
@@ -83,10 +87,12 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
               value={cur}
               placeholder="—"
               onChange={(v) => {
-                const next = clampScore(v, max, step);
-                if (next === null) return;
-                onPick(d.key, next);
+                // Keep partial keyboard input (e.g. the 1 in 15) intact.
+                if (v !== null) onPick(d.key, v);
               }}
+              onBlur={(e) => commit(e.target.value)}
+              onPressEnter={(e) => commit((e.target as HTMLInputElement).value)}
+              onStep={(v) => commit(v)}
               style={{ width: 58 }}
             />
             <span style={{ width: 30, fontSize: 11, color: "#98a2b3", textAlign: "right" }}>/{max}</span>
@@ -104,7 +110,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
         for (let m = 0; m <= max; m += st) marks.push(m);
         return marks.join(" / ");
       })()}
-      （滑杆和数字框都只停在这些档位上）
+      （滑杆按档调整，数字框失焦或回车后自动对齐）
     </div>
     </>
   );
