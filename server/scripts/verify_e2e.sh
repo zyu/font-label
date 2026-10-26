@@ -157,9 +157,10 @@ curl -s -X POST "$API/exports" -H "Authorization: Bearer $AT" -H 'Content-Type: 
 check "csv 带 BOM" "yes" "$(head -c 3 /tmp/fl_export.csv | grep -q $'\xef\xbb\xbf' && echo yes || echo no)"
 check "csv 首列是文件夹名" "$FNAME" "$(sed -n '2p' /tmp/fl_export.csv | cut -d, -f1)"
 
-echo "== 15b. 训练集 JSONL =="
+echo "== 15b. 训练集 ZIP =="
 curl -s -X POST "$API/exports" -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
-  -d "{\"format\":\"jsonl\",\"filters\":{\"folders\":[$FID],\"status\":\"all\"}}" -o /tmp/fl_train.jsonl
+  -d "{\"format\":\"jsonl\",\"filters\":{\"folders\":[$FID],\"status\":\"all\"}}" -o /tmp/fl_train.zip
+unzip -p /tmp/fl_train.zip data.jsonl > /tmp/fl_train.jsonl
 J_LINES=$(wc -l < /tmp/fl_train.jsonl | tr -d ' ')
 check "jsonl 有样本" "yes" "$([ "${J_LINES:-0}" -ge 1 ] && echo yes || echo no)"
 check "每行字段恰好 messages+images" "$J_LINES" \
@@ -168,8 +169,10 @@ check "assistant 是五维分数或无效结论" "$J_LINES" \
   "$(jq -r '.messages[1].content' /tmp/fl_train.jsonl | grep -cE '总分：|^无效：')"
 check "user 带 <image> 占位" "yes" \
   "$(jq -r '.messages[0].content' /tmp/fl_train.jsonl | head -1 | grep -q '<image>' && echo yes || echo no)"
-check "images 路径为 images/<folder>/<file>" "yes" \
-  "$(jq -r '.images[0]' /tmp/fl_train.jsonl | head -1 | grep -q "^images/$FID/" && echo yes || echo no)"
+check "ZIP 图片数与样本行数一致" "$J_LINES" \
+  "$(unzip -Z1 /tmp/fl_train.zip | grep -c '^images/[^/]*$')"
+check "ZIP 图片路径全局唯一且全部匹配 JSONL" "yes" \
+  "$(diff <(unzip -Z1 /tmp/fl_train.zip | grep '^images/' | sort) <(jq -r '.images[0]' /tmp/fl_train.jsonl | sort -u) >/dev/null && echo yes || echo no)"
 
 echo "== 16. 权限 =="
 LOCKED=$(curl -s -X POST "$API/upload" -H "Authorization: Bearer $AT" \

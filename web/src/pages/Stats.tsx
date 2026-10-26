@@ -1,4 +1,4 @@
-import { Card, Col, Empty, Progress, Row, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Card, Col, Empty, Progress, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
@@ -46,6 +46,9 @@ interface AnnotatorRow {
   reject_rate: number;
   first_pass_rate: number;
   reject_events: number;
+  review_events: number;
+  reviewed: number;
+  first_pass: number;
 }
 
 export default function StatsPage() {
@@ -206,8 +209,22 @@ export default function StatsPage() {
             { title: "已通过", dataIndex: "approved" },
             { title: "已打回", dataIndex: "rejected" },
             { title: "待审核", dataIndex: "pending" },
-            { title: "驳回率", dataIndex: "reject_rate", render: (v: number) => `${Number(v).toFixed(1)}%` },
-            { title: "一次通过率", dataIndex: "first_pass_rate", render: (v: number) => `${Number(v).toFixed(1)}%` },
+            {
+              title: "驳回率", dataIndex: "reject_rate",
+              render: (v: number, r: AnnotatorRow) => (
+                <Tooltip title={`打回 ${r.reject_events} 次 / 已审核 ${r.review_events} 次`}>
+                  <span>{Number(v).toFixed(1)}%</span>
+                </Tooltip>
+              ),
+            },
+            {
+              title: "一次通过率", dataIndex: "first_pass_rate",
+              render: (v: number, r: AnnotatorRow) => (
+                <Tooltip title={`首次提交即通过 ${r.first_pass} 张 / 已审核 ${r.reviewed} 张`}>
+                  <span>{Number(v).toFixed(1)}%</span>
+                </Tooltip>
+              ),
+            },
             { title: "平均分", dataIndex: "avg_total", render: (v: number) => Number(v).toFixed(1) },
             { title: "平均耗时", dataIndex: "avg_ms", render: (v: number) => (v > 0 ? `${Math.round(v / 1000)}s` : "-") },
             { title: "异常上报", dataIndex: "exceptions" },
@@ -247,7 +264,7 @@ export default function StatsPage() {
       </Card>
 
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        口径：驳回率 = 打回次数 / 已审核次数；一次通过率 = 首次提交即通过的图片 / 已审核图片；平均耗时取前端从打开到提交的计时。数字均由服务端 SQL 聚合。
+        口径：驳回率 = 打回次数 / 已审核次数（多次审核分别计次）；一次通过率 = 首次提交即通过的图片 / 已审核图片（图片去重，包含审核确认无效的异常图，打回后重提待审的图片仍计入）。平均耗时取前端从打开到提交的计时。数字均由服务端 SQL 聚合。
       </Typography.Text>
     </Space>
   );

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { message } from "antd";
-import { downloadBlob } from "../../api/client";
+import { api, downloadBlob } from "../../api/client";
 import ExportsPage from "../admin/Exports";
 
 vi.mock("../../api/client", async (original) => ({
@@ -11,6 +11,7 @@ vi.mock("../../api/client", async (original) => ({
 }));
 
 beforeEach(() => {
+  vi.spyOn(api, "get").mockResolvedValue({ items: [] });
   vi.stubGlobal("localStorage", { getItem: () => null });
   const getComputedStyle = window.getComputedStyle.bind(window);
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => getComputedStyle(element));
@@ -38,6 +39,17 @@ function blobText(blob: Blob): Promise<string> {
 }
 
 describe("JSON 导出下载交互", () => {
+  it("训练集下载 ZIP，完成后刷新导出记录", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("zip bytes", { status: 200, headers: {
+      "Content-Type": "application/zip", "Content-Disposition": 'attachment; filename="dataset.zip"',
+    } })));
+    mount();
+    fireEvent.click(screen.getByText("训练集 ZIP", { exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /导\s*出/ }));
+    await waitFor(() => expect(downloadBlob).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/\.zip$/)));
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("/exports"));
+  });
+
   it.each([
     ["仅已通过", "approved"],
     ["已审核（含打回）", "reviewed"],
@@ -67,5 +79,6 @@ describe("JSON 导出下载交互", () => {
     fireEvent.click(screen.getByRole("button", { name: /导\s*出/ }));
     await waitFor(() => expect(message.error).toHaveBeenCalledWith("导出响应格式异常，请重试"));
     expect(downloadBlob).not.toHaveBeenCalled();
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("/exports"));
   });
 });

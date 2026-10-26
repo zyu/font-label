@@ -9,6 +9,26 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
 )
 
+// Both dashboards count review events from the same history. Attribute each
+// event to the submitted version's author, even if the image is later reassigned.
+// Legacy rows without a version snapshot fall back to the annotation's author.
+const reviewStatsCTE = `review_events AS (
+    SELECT r.image_id, r.action, r.annotation_version,
+           COALESCE(v.annotator_id, a.annotator_id) AS annotator_id,
+           row_number() OVER (PARTITION BY r.image_id ORDER BY r.annotation_version, r.id) AS review_order
+      FROM reviews r
+      JOIN annotations a ON a.id = r.annotation_id
+      LEFT JOIN annotation_versions v ON v.image_id = r.image_id AND v.version = r.annotation_version
+), review_stats AS (
+    SELECT annotator_id, count(*) AS review_events,
+           count(*) FILTER (WHERE action='reject') AS reject_events,
+           count(DISTINCT image_id) AS reviewed,
+           count(DISTINCT image_id) FILTER (
+               WHERE review_order=1 AND annotation_version=1 AND action='approve'
+           ) AS first_pass
+      FROM review_events GROUP BY annotator_id
+)`
+
 func (s *Server) handleStatsOverview(c *gin.Context) {
 	ctx := c.Request.Context()
 	var (
@@ -39,8 +59,12 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 	_ = s.pool().QueryRow(ctx,
 		`SELECT COALESCE(avg(total),0) FROM annotations WHERE kind='score' AND total IS NOT NULL`).Scan(&avgTotal)
 	var reviewEvents, rejectEvents int
-	_ = s.pool().QueryRow(ctx,
-		`SELECT count(*), count(*) FILTER (WHERE action='reject') FROM reviews`).Scan(&reviewEvents, &rejectEvents)
+	if err := s.pool().QueryRow(ctx, `WITH `+reviewStatsCTE+`
+		SELECT COALESCE(sum(review_events),0)::bigint, COALESCE(sum(reject_events),0)::bigint
+		FROM review_stats`).Scan(&reviewEvents, &rejectEvents); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
 	if reviewEvents > 0 {
 		rejectRate = float64(rejectEvents) / float64(reviewEvents) * 100
 	}
@@ -50,12 +74,12 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 		"today_upload": todayUpload, "today_submit": todaySubmit,
 		"today_review": todayReview, "today_reject": todayReject,
 		"avg_total": avgTotal, "reject_rate": rejectRate,
+		"review_events": reviewEvents, "reject_events": rejectEvents,
 	})
 }
 
 func (s *Server) handleStatsAnnotators(c *gin.Context) {
-	rows, err := s.pool().Query(c.Request.Context(), `
-		WITH cl AS (
+	rows, err := s.pool().Query(c.Request.Context(), `WITH `+reviewStatsCTE+`, cl AS (
 		    SELECT user_id, count(*) AS claim_times, COALESCE(sum(granted),0) AS granted
 		      FROM claims GROUP BY user_id
 		), an AS (
@@ -69,10 +93,7 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 		           count(*) FILTER (WHERE status='approved') AS approved,
 		           count(*) FILTER (WHERE status='rejected') AS rejected,
 		           count(*) FILTER (WHERE status='submitted') AS pending,
-		           count(*) FILTER (WHERE status='assigned') AS holding,
-		           COALESCE(sum(reject_count),0) AS reject_events,
-		           count(*) FILTER (WHERE status='approved' AND reject_count=0) AS first_pass,
-		           count(*) FILTER (WHERE status IN ('approved','excluded','rejected')) AS reviewed
+		           count(*) FILTER (WHERE status='assigned') AS holding
 		      FROM images WHERE annotator_id IS NOT NULL GROUP BY annotator_id
 		)
 		SELECT u.id, u.display_name, u.status,
@@ -82,13 +103,14 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 		       COALESCE(im.holding,0)::int,
 		       COALESCE(an.avg_total,0)::float8, COALESCE(an.avg_ms,0)::int,
 		       COALESCE(an.exceptions,0)::int,
-		       COALESCE(im.first_pass,0)::int, COALESCE(im.reviewed,0)::int,
-		       COALESCE(im.reject_events,0)::int
+		       COALESCE(rs.first_pass,0)::int, COALESCE(rs.reviewed,0)::int,
+		       COALESCE(rs.reject_events,0)::int, COALESCE(rs.review_events,0)::int
 		  FROM users u
 		  LEFT JOIN cl ON cl.user_id = u.id
 		  LEFT JOIN an ON an.annotator_id = u.id
 		  LEFT JOIN im ON im.annotator_id = u.id
-		 WHERE u.role = 'annotator' OR COALESCE(an.submitted,0) > 0
+		  LEFT JOIN review_stats rs ON rs.annotator_id = u.id
+		 WHERE u.role = 'annotator' OR COALESCE(an.submitted,0) > 0 OR COALESCE(rs.review_events,0) > 0
 		 ORDER BY COALESCE(an.submitted,0) DESC, u.id`)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -104,17 +126,17 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 			approved, rejected, pending, holding int
 			avgTotal                             float64
 			avgMS, exceptions, firstPass         int
-			reviewed, rejectEvents               int
+			reviewed, rejectEvents, reviewEvents int
 		)
 		if err := rows.Scan(&id, &name, &status, &claimTimes, &granted, &submitted, &approved,
 			&rejected, &pending, &holding, &avgTotal, &avgMS, &exceptions,
-			&firstPass, &reviewed, &rejectEvents); err != nil {
+			&firstPass, &reviewed, &rejectEvents, &reviewEvents); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
 		rejectRate := 0.0
-		if reviewed > 0 {
-			rejectRate = float64(rejected) / float64(reviewed) * 100
+		if reviewEvents > 0 {
+			rejectRate = float64(rejectEvents) / float64(reviewEvents) * 100
 		}
 		firstPassRate := 0.0
 		if reviewed > 0 {
@@ -126,8 +148,13 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 			"approved": approved, "rejected": rejected, "pending": pending, "holding": holding,
 			"avg_total": avgTotal, "avg_ms": avgMS, "exceptions": exceptions,
 			"reject_rate": rejectRate, "first_pass_rate": firstPassRate,
-			"reject_events": rejectEvents, "reviewed": reviewed,
+			"reject_events": rejectEvents, "review_events": reviewEvents,
+			"reviewed": reviewed, "first_pass": firstPass,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		httpx.Fail(c, err)
+		return
 	}
 	httpx.OK(c, gin.H{"items": items})
 }

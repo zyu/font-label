@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Descriptions, Empty, Input, InputNumber, Modal, Space, Spin, Tag, Typography, message } from "antd";
 import { CheckOutlined, CloseOutlined, ArrowLeftOutlined, ArrowRightOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { ImageDTO, ImageDetail, Page } from "../api/types";
 import { useAuth } from "../auth";
@@ -13,6 +13,9 @@ export default function ReviewPage() {
   const { imageId } = useParams();
   const id = Number(imageId);
   const nav = useNavigate();
+  const location = useLocation();
+  const returnTo = location.state?.returnTo?.startsWith("/review?") ? location.state.returnTo : "/review";
+  const navigateToImage = (imageId: number) => nav(`/review/${imageId}`, { state: location.state });
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
@@ -49,7 +52,7 @@ export default function ReviewPage() {
       const list = queue.data?.items ?? [];
       const idx = list.findIndex((x) => x.id === id);
       const next = idx >= 0 ? list[idx + 1] : undefined;
-      nav(next ? `/review/${next.id}` : "/review");
+      if (next) navigateToImage(next.id); else nav(returnTo);
     },
     onError: (e) => message.error(e instanceof ApiError ? e.message : "操作失败"),
   });
@@ -106,6 +109,7 @@ export default function ReviewPage() {
     <div className="annotate-shell">
       <div className="annotate-top">
         <Space size={14} wrap>
+          <Button aria-label="返回列表" icon={<ArrowLeftOutlined />} disabled={review.isPending} onClick={() => nav(returnTo)}>返回列表</Button>
           <Tag color="blue">{image.folder}</Tag>
           <Typography.Text strong>{image.stored_name}</Typography.Text>
           <Typography.Text type="secondary">标注员：{image.annotator || "-"}</Typography.Text>
@@ -115,8 +119,8 @@ export default function ReviewPage() {
           {image.reject_count > 0 && <Tag color="volcano">历史驳回 {image.reject_count} 次</Tag>}
         </Space>
         <Space>
-          <Button icon={<ArrowLeftOutlined />} disabled={!prev} onClick={() => nav(`/review/${prev!.id}`)} />
-          <Button icon={<ArrowRightOutlined />} disabled={!next} onClick={() => nav(`/review/${next!.id}`)} />
+          <Button aria-label="上一张" icon={<ArrowLeftOutlined />} disabled={!prev || review.isPending} onClick={() => navigateToImage(prev!.id)} />
+          <Button aria-label="下一张" icon={<ArrowRightOutlined />} disabled={!next || review.isPending} onClick={() => navigateToImage(next!.id)} />
         </Space>
       </div>
 

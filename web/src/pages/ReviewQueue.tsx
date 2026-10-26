@@ -1,14 +1,21 @@
-import { useState } from "react";
 import { Badge, Button, Card, Empty, Segmented, Select, Space, Table, Tag, Typography } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { STATUS_LABEL, type FolderDTO, type ImageDTO, type Page } from "../api/types";
 
 export default function ReviewQueuePage() {
   const nav = useNavigate();
-  const [kind, setKind] = useState<string>("");
-  const [folderId, setFolderId] = useState<number | undefined>();
+  const location = useLocation();
+  const [params, setParams] = useSearchParams();
+  const kind = params.get("kind") ?? "";
+  const folderId = Number(params.get("folder_id")) || undefined;
+  const setFilter = (key: string, value: string) => setParams((current) => {
+    const next = new URLSearchParams(current);
+    if (value) next.set(key, value); else next.delete(key);
+    return next;
+  });
+  const openReview = (id: number) => nav(`/review/${id}`, { state: { returnTo: `${location.pathname}${location.search}` } });
 
   const folders = useQuery({
     queryKey: ["folders"],
@@ -33,10 +40,10 @@ export default function ReviewQueuePage() {
       title: "图片",
       width: 80,
       render: (_: unknown, row: ImageDTO) => (
-        <img className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => nav(`/review/${row.id}`)} />
+        <img className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => openReview(row.id)} />
       ),
     },
-    { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => nav(`/review/${row.id}`)}>{v}</a> },
+    { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => openReview(row.id)}>{v}</a> },
     { title: "文件夹", dataIndex: "folder" },
     { title: "标注员", dataIndex: "annotator" },
     {
@@ -60,7 +67,7 @@ export default function ReviewQueuePage() {
       title: "操作",
       width: 140,
       render: (_: unknown, row: ImageDTO) => (
-        <Button type="primary" size="small" onClick={() => nav(`/review/${row.id}`)}>
+        <Button type="primary" size="small" onClick={() => openReview(row.id)}>
           审核
         </Button>
       ),
@@ -75,7 +82,7 @@ export default function ReviewQueuePage() {
             <Typography.Text type="secondary">类型</Typography.Text>
             <Segmented
               value={kind}
-              onChange={(v) => setKind(String(v))}
+              onChange={(v) => setFilter("kind", String(v))}
               options={[
                 { label: "全部", value: "" },
                 { label: "评分", value: "score" },
@@ -90,12 +97,12 @@ export default function ReviewQueuePage() {
               placeholder="全部文件夹"
               style={{ minWidth: 200 }}
               value={folderId}
-              onChange={setFolderId}
+              onChange={(value) => setFilter("folder_id", value ? String(value) : "")}
               options={(folders.data?.items ?? []).map((f) => ({ label: `${f.name}（待审 ${f.submitted}）`, value: f.id }))}
             />
           </Space>
           <Badge count={queue.data?.total ?? 0} showZero color="#2b5cff" />
-          <Button type="primary" disabled={!first} onClick={() => first && nav(`/review/${first.id}`)}>
+          <Button type="primary" disabled={!first} onClick={() => first && openReview(first.id)}>
             开始逐条审核
           </Button>
         </Space>

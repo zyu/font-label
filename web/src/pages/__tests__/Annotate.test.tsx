@@ -25,12 +25,12 @@ function detail(id: number, filled = true): ImageDetail {
   return { image: { id, scores: filled ? scores : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
 }
 
-function mount(filled = true) {
+function mount(filled = true, imageDetail = detail(1, filled)) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
-  qc.setQueryData(["image", 1], detail(1, filled));
+  qc.setQueryData(["image", 1], imageDetail);
   qc.setQueryData(["image", 2], detail(2, filled));
   qc.setQueryData(["annotate-queue"], [detail(1).image, detail(2).image]);
-  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={["/workbench/1"]}><Routes>
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={[{ pathname: "/workbench/1", state: { returnTo: "/workbench?tab=approved" } }]}><Routes>
     <Route path="/workbench/:imageId" element={<AnnotatePage />} />
     <Route path="/workbench" element={<div>工作台</div>} />
   </Routes></MemoryRouter></QueryClientProvider>);
@@ -53,6 +53,44 @@ beforeEach(() => {
 afterEach(() => { Modal.destroyAll(); cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("标注交互回归", () => {
+  it.each(["submitted", "approved", "excluded"] as const)("%s 图片只读，忽略旧草稿，点击和快捷键均不能提交", async (status) => {
+    showScorePanel = true;
+    const saved = detail(1);
+    saved.image.status = status;
+    saved.draft = { kind: "score", scores: { ...scores, white: 0 }, dim_comments: { ...comments, white: "不应显示的旧草稿" } };
+    mount(true, saved);
+    expect(screen.getAllByRole("spinbutton")[0]).toBeDisabled();
+    expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue(comments.white);
+    expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /异常/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "e" });
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "提交异常" })).not.toBeInTheDocument();
+    expect(api.post).not.toHaveBeenCalled();
+    expect(api.put).not.toHaveBeenCalled();
+  });
+
+  it.each(["submitted", "excluded"])("%s 异常图展示具体原因与备注", (status) => {
+    const saved = detail(1);
+    Object.assign(saved.image, { status, kind: "exception", exception_reasons: ["blur", "retired_reason"], comment: "右下角无法辨认" });
+    mount(true, saved);
+    expect(screen.getByText("图片模糊")).toBeInTheDocument();
+    expect(screen.getByText("retired_reason")).toBeInTheDocument();
+    expect(screen.getByText(/右下角无法辨认/)).toBeInTheDocument();
+  });
+
+  it("返回列表前保存修改的草稿", async () => {
+    mount();
+    fireEvent.change(document.querySelector('[data-test="dim-comment-white"]')!, { target: { value: "返回列表也需要保存的最新点评。" } });
+    fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "保存草稿并切换" }));
+    await screen.findByText("工作台");
+    expect(api.put).toHaveBeenCalledWith("/images/1/draft", expect.objectContaining({ dim_comments: { ...comments, white: "返回列表也需要保存的最新点评。" } }));
+  });
+
   it("点击提交会提示未填写原因，与快捷键保持一致", () => {
     mount(false);
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));

@@ -1,13 +1,17 @@
 package app
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +24,7 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
 	"github.com/shangyue/font-label/server/internal/platform/score"
+	"github.com/shangyue/font-label/server/internal/platform/storage"
 )
 
 type exportFilters struct {
@@ -32,6 +37,7 @@ type exportFilters struct {
 }
 
 type exportRow struct {
+	ID         int64
 	FolderID   int64
 	Folder     string
 	StoredName string
@@ -59,7 +65,7 @@ SELECT f.name, i.stored_name, i.orig_name, i.seq, COALESCE(u.display_name,''),
        a.total, COALESCE(a.grade,''),
        COALESCE(a.comment,''), i.status, COALESCE(rv.display_name,''), i.reviewed_at,
        i.reject_count, COALESCE(array_to_string(a.exception_reasons, '、'),''), i.rel_path,
-       i.folder_id
+       i.folder_id, i.id
   FROM images i
   JOIN folders f ON f.id = i.folder_id
   LEFT JOIN annotations a ON a.image_id = i.id
@@ -76,7 +82,7 @@ func scanExportRow(rows pgx.Rows) (exportRow, error) {
 	var submitted, reviewed *time.Time
 	if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
 		&submitted, &scores, &dimComments, &total, &r.Grade, &r.Comment, &r.Status, &r.Reviewer,
-		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID); err != nil {
+		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID, &r.ID); err != nil {
 		return r, err
 	}
 	r.Submitted, r.ReviewedAt, r.Total = submitted, reviewed, total
@@ -175,35 +181,134 @@ func (s *Server) handleCreateExport(c *gin.Context) {
 		return
 	}
 
-	if len(rows) > 5000 {
-		filtersJSON, _ := json.Marshal(in.Filters)
-		var jobID int64
-		err := s.pool().QueryRow(ctx,
-			`INSERT INTO export_jobs (user_id, format, filters, status) VALUES ($1,$2,$3::jsonb,'pending')
-			 RETURNING id`, me.ID, in.Format, filtersJSON).Scan(&jobID)
-		if err != nil {
-			httpx.Fail(c, err)
-			return
-		}
-		s.audit(c, "export.enqueue", "export", jobID, map[string]any{"format": in.Format, "rows": len(rows)})
-		httpx.OK(c, gin.H{"async": true, "job_id": jobID, "row_count": len(rows)})
-		return
-	}
-
 	rubric, err := s.activeRubric(ctx)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	data, contentType, err := renderExport(in.Format, rows, rubric.Dims, s.exceptionLabels(ctx))
-	if err != nil {
+	labels := s.exceptionLabels(ctx)
+	rows = eligibleExportRows(in.Format, rows, rubric.Dims, labels)
+	if len(rows) == 0 {
+		httpx.Fail(c, httpx.NotFound("没有符合条件的训练样本（仅包含审核通过的评分和无效图）"))
+		return
+	}
+
+	// Every export has a persistent record, including immediate downloads.
+	filtersJSON, _ := json.Marshal(in.Filters)
+	status := "running"
+	if len(rows) > 5000 {
+		status = "pending"
+	}
+	var jobID int64
+	if err := s.pool().QueryRow(ctx,
+		`INSERT INTO export_jobs (user_id, format, filters, status, row_count) VALUES ($1,$2,$3::jsonb,$4,$5) RETURNING id`,
+		me.ID, in.Format, filtersJSON, status, len(rows)).Scan(&jobID); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	s.audit(c, "export.download", "export", 0, map[string]any{"format": in.Format, "rows": len(rows)})
-	name := "font-label_" + time.Now().Format("20060102_1504") + "." + in.Format
-	c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
-	c.Data(http.StatusOK, contentType, data)
+	if status == "pending" {
+		s.audit(c, "export.enqueue", "export", jobID, map[string]any{"format": in.Format, "rows": len(rows)})
+		httpx.OK(c, gin.H{"async": true, "job_id": jobID, "row_count": len(rows)})
+		return
+	}
+	if err := s.writeExportFile(ctx, jobID, in.Format, rows, rubric.Dims, labels); err != nil {
+		s.failExportJob(ctx, jobID, err)
+		httpx.Fail(c, err)
+		return
+	}
+	s.audit(c, "export.download", "export", jobID, map[string]any{"format": in.Format, "rows": len(rows)})
+	c.Header("Content-Type", exportContentType(in.Format))
+	c.FileAttachment(s.exportPath(jobID, in.Format), fmt.Sprintf("font-label_%d.%s", jobID, exportExtension(in.Format)))
+}
+
+func exportExtension(format string) string {
+	if format == "jsonl" {
+		return "zip"
+	}
+	return format
+}
+
+func exportContentType(format string) string {
+	switch format {
+	case "jsonl":
+		return "application/zip"
+	case "csv":
+		return "text/csv; charset=utf-8"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	default:
+		return "application/json; charset=utf-8"
+	}
+}
+
+func (s *Server) exportPath(jobID int64, format string) string {
+	return filepath.Join(s.exportDir(), fmt.Sprintf("export_%d.%s", jobID, exportExtension(format)))
+}
+
+func (s *Server) failExportJob(ctx context.Context, jobID int64, cause error) {
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := s.pool().Exec(finishCtx, `UPDATE export_jobs SET status='failed', error=$2, finished_at=now() WHERE id=$1`, jobID, cause.Error()); err != nil {
+		slog.Error("export failure status update failed", "id", jobID, "err", err)
+	}
+}
+
+func eligibleExportRows(format string, rows []exportRow, dims []score.Dim, labels map[string]string) []exportRow {
+	if format != "jsonl" {
+		return rows
+	}
+	out := make([]exportRow, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := assistantContent(row, dims, labels); ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// writeExportFile streams ZIP images to disk and publishes only a complete artifact.
+func (s *Server) writeExportFile(ctx context.Context, jobID int64, format string, rows []exportRow, dims []score.Dim, labels map[string]string) error {
+	if err := os.MkdirAll(s.exportDir(), 0o755); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(s.exportDir(), ".export-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	count := len(rows)
+	if format == "jsonl" {
+		count, err = renderTrainingZIP(file, rows, dims, labels, s.store)
+	} else {
+		var data []byte
+		data, _, err = renderExport(format, rows, dims, labels)
+		if err == nil {
+			_, err = file.Write(data)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return fmt.Errorf("没有符合条件的导出数据")
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	target := s.exportPath(jobID, format)
+	if err := os.Rename(file.Name(), target); err != nil {
+		return err
+	}
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err = s.pool().Exec(finishCtx,
+		`UPDATE export_jobs SET status='done', file_path=$2, row_count=$3,
+		 finished_at=now(), expires_at=now() + interval '24 hours' WHERE id=$1`, jobID, target, count)
+	if err != nil {
+		_ = os.Remove(target)
+	}
+	return err
 }
 
 func renderExport(format string, rows []exportRow, dims []score.Dim, labels map[string]string) ([]byte, string, error) {
@@ -214,9 +319,6 @@ func renderExport(format string, rows []exportRow, dims []score.Dim, labels map[
 	case "csv":
 		b, err := renderCSV(rows, dims)
 		return b, "text/csv; charset=utf-8", err
-	case "jsonl":
-		b, err := renderJSONL(rows, dims, labels)
-		return b, "application/x-ndjson; charset=utf-8", err
 	default:
 		b, err := renderJSON(rows)
 		return b, "application/json; charset=utf-8", err
@@ -247,7 +349,7 @@ func (s *Server) exceptionLabels(ctx context.Context) map[string]string {
 // 训练集用：每行是一条多模态样本，格式与训练侧对齐
 //
 //	{"messages":[{"role":"user","content":"<image>请评价…"},{"role":"assistant","content":"白平衡（匀）：20/20\n…"}],
-//	 "images":["images/<folder_id>/<stored_name>"]}
+//	 "images":["images/<image_id>_<stored_name>"]}
 const trainUserPrompt = "<image>请评价这位学员的硬笔楷书单字，并按五维给出评分与评语。"
 
 // assistantContent 生成训练侧的答案文本；ok=false 表示这条没有可用于训练的标注（未审核/未提交）
@@ -318,13 +420,64 @@ func renderJSONL(rows []exportRow, dims []score.Dim, labels map[string]string) (
 				{Role: "user", Content: trainUserPrompt},
 				{Role: "assistant", Content: content},
 			},
-			Images: []string{fmt.Sprintf("images/%d/%s", r.FolderID, r.StoredName)},
+			Images: []string{trainingImagePath(r)},
 		}
 		if err := enc.Encode(rec); err != nil {
 			return nil, err
 		}
 	}
 	return buf.Bytes(), nil
+}
+
+// IDs are globally unique and stable across datasets; basename keeps the ZIP flat.
+func trainingImagePath(row exportRow) string {
+	name := path.Base(strings.ReplaceAll(row.StoredName, "\\", "/"))
+	return fmt.Sprintf("images/%d_%s", row.ID, name)
+}
+
+func renderTrainingZIP(w io.Writer, rows []exportRow, dims []score.Dim, labels map[string]string, store *storage.Store) (int, error) {
+	rows = eligibleExportRows("jsonl", rows, dims, labels)
+	if len(rows) == 0 {
+		return 0, fmt.Errorf("没有符合条件的训练样本")
+	}
+	archive := zip.NewWriter(w)
+	defer archive.Close()
+	data, err := renderJSONL(rows, dims, labels)
+	if err != nil {
+		return 0, err
+	}
+	manifest, err := archive.Create("data.jsonl")
+	if err != nil {
+		return 0, err
+	}
+	if _, err := manifest.Write(data); err != nil {
+		return 0, err
+	}
+	for _, row := range rows {
+		if err := appendTrainingImage(archive, row, store); err != nil {
+			return 0, err
+		}
+	}
+	if err := archive.Close(); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+func appendTrainingImage(archive *zip.Writer, row exportRow, store *storage.Store) error {
+	file, err := store.Open(row.RelPath)
+	if err != nil {
+		return fmt.Errorf("读取图片 %s: %w", row.StoredName, err)
+	}
+	defer file.Close()
+	entry, err := archive.Create(trainingImagePath(row))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(entry, file); err != nil {
+		return fmt.Errorf("打包图片 %s: %w", row.StoredName, err)
+	}
+	return nil
 }
 
 var baseHeaders = []string{
@@ -477,7 +630,7 @@ func (s *Server) handleListExports(c *gin.Context) {
 		args = []any{}
 	}
 	rows, err := s.pool().Query(c.Request.Context(),
-		`SELECT id, format, status, row_count, COALESCE(error,''), created_at, finished_at, expires_at
+		`SELECT id, format, status, COALESCE(row_count,0), COALESCE(error,''), created_at, finished_at, expires_at
 		   FROM export_jobs WHERE `+clause+` ORDER BY id DESC LIMIT 50`, args...)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -503,6 +656,10 @@ func (s *Server) handleListExports(c *gin.Context) {
 			"id": id, "format": format, "status": status, "row_count": rowsN,
 			"error": errText, "created_at": createdAt, "finished_at": finishedAt, "expires_at": expiresAt,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		httpx.Fail(c, err)
+		return
 	}
 	httpx.OK(c, gin.H{"items": items})
 }
@@ -546,10 +703,14 @@ func (s *Server) handleDownloadExport(c *gin.Context) {
 		return
 	}
 	defer f.Close()
-	st, _ := f.Stat()
-	name := "font-label_" + strconv.FormatInt(id, 10) + "." + format
+	st, err := f.Stat()
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	name := "font-label_" + strconv.FormatInt(id, 10) + "." + exportExtension(format)
 	c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
-	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Type", exportContentType(format))
 	http.ServeContent(c.Writer, c.Request, name, st.ModTime(), f)
 }
 
@@ -580,20 +741,6 @@ func (s *Server) runExportJob(jobID int64, userID int64, format string, filtersJ
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	data, _, err := renderExport(format, out, rubricForExport.Dims, s.exceptionLabels(contextBackground()))
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(s.exportDir(), 0o755); err != nil {
-		return err
-	}
-	target := filepath.Join(s.exportDir(), fmt.Sprintf("export_%d.%s", jobID, format))
-	if err := os.WriteFile(target, data, 0o644); err != nil {
-		return err
-	}
-	_, err = s.pool().Exec(contextBackground(),
-		`UPDATE export_jobs SET status='done', file_path=$2, row_count=$3,
-		        finished_at=now(), expires_at=now() + interval '24 hours' WHERE id=$1`,
-		jobID, target, len(out))
-	return err
+	out = eligibleExportRows(format, out, rubricForExport.Dims, s.exceptionLabels(contextBackground()))
+	return s.writeExportFile(contextBackground(), jobID, format, out, rubricForExport.Dims, s.exceptionLabels(contextBackground()))
 }

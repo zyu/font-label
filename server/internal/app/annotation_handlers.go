@@ -36,29 +36,29 @@ func (s *Server) handleSaveDraft(c *gin.Context) {
 	}
 	me := auth.MustCurrent(c)
 	ctx := c.Request.Context()
-	var row struct {
-		AnnotatorID int64
-		Status      string
-	}
-	if err := s.pool().QueryRow(ctx,
-		`SELECT COALESCE(annotator_id,0), status FROM images WHERE id=$1`, id).
-		Scan(&row.AnnotatorID, &row.Status); err != nil {
-		httpx.Fail(c, httpx.NotFound("图片不存在"))
-		return
-	}
-	if row.AnnotatorID != me.ID {
-		httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
-		return
-	}
 	body, err := c.GetRawData()
 	if err != nil || !json.Valid(body) {
 		httpx.Fail(c, httpx.BadRequest("草稿内容不是合法 JSON"))
 		return
 	}
-	_, err = s.pool().Exec(ctx,
-		`INSERT INTO drafts (user_id, image_id, payload, updated_at) VALUES ($1,$2,$3::jsonb,now())
-		 ON CONFLICT (user_id, image_id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`,
-		me.ID, id, body)
+	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		var annotatorID int64
+		var status string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(annotator_id,0), status FROM images WHERE id=$1 FOR UPDATE`, id).Scan(&annotatorID, &status); err != nil {
+			return httpx.NotFound("图片不存在")
+		}
+		if annotatorID != me.ID {
+			return httpx.Forbidden("这不是你的任务")
+		}
+		if status != "assigned" && status != "rejected" {
+			return httpx.Conflict("该任务当前状态为只读，不能保存草稿")
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO drafts (user_id, image_id, payload, updated_at) VALUES ($1,$2,$3::jsonb,now())
+			 ON CONFLICT (user_id, image_id) DO UPDATE SET payload=EXCLUDED.payload, updated_at=now()`,
+			me.ID, id, body)
+		return err
+	})
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -114,10 +114,15 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		var imgID int64
 		var ver int
 		var total float64
+		var ownerID int64
 		err := s.pool().QueryRow(ctx,
-			`SELECT image_id, version, COALESCE(total,0) FROM annotations WHERE client_submit_id=$1`,
-			in.ClientSubmitID).Scan(&imgID, &ver, &total)
+			`SELECT image_id, version, COALESCE(total,0), annotator_id FROM annotations WHERE client_submit_id=$1`,
+			in.ClientSubmitID).Scan(&imgID, &ver, &total, &ownerID)
 		if err == nil {
+			if ownerID != me.ID {
+				httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
+				return
+			}
 			if imgID != id {
 				httpx.Fail(c, httpx.Conflict("提交标识已被其他任务使用"))
 				return
@@ -141,11 +146,6 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
 		return
 	}
-	if status != "assigned" && status != "rejected" {
-		httpx.Fail(c, httpx.Conflict("该任务当前状态不能提交（可能已被回收）"))
-		return
-	}
-
 	kind := in.Kind
 	if kind != "score" && kind != "exception" {
 		httpx.Fail(c, httpx.Validation(map[string]string{"kind": "score 或 exception"}, "标注类型不合法"))
@@ -213,7 +213,33 @@ func (s *Server) handleSubmit(c *gin.Context) {
 	}
 
 	var newVersion int
+	var duplicate bool
 	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		// Serialize with review, draft saves and claim changes before mutating annotations.
+		if err := tx.QueryRow(ctx, `SELECT status, COALESCE(annotator_id,0) FROM images WHERE id=$1 FOR UPDATE`, id).Scan(&status, &annotatorID); err != nil {
+			return httpx.NotFound("图片不存在")
+		}
+		if annotatorID != me.ID {
+			return httpx.Forbidden("这不是你的任务")
+		}
+		// A concurrent retry may have committed while this request waited for the lock.
+		if in.ClientSubmitID != "" {
+			var previousImageID int64
+			err := tx.QueryRow(ctx, `SELECT image_id, version, COALESCE(total,0) FROM annotations WHERE client_submit_id=$1`, in.ClientSubmitID).Scan(&previousImageID, &newVersion, &total)
+			if err == nil {
+				if previousImageID != id {
+					return httpx.Conflict("提交标识已被其他任务使用")
+				}
+				duplicate = true
+				return nil
+			}
+			if err != pgx.ErrNoRows {
+				return err
+			}
+		}
+		if status != "assigned" && status != "rejected" {
+			return httpx.Conflict("该任务当前状态为只读，不能提交")
+		}
 		var prev int
 		_ = tx.QueryRow(ctx, `SELECT version FROM annotations WHERE image_id=$1`, id).Scan(&prev)
 		newVersion = prev + 1
@@ -257,13 +283,14 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		if _, err := tx.Exec(ctx, `DELETE FROM drafts WHERE user_id=$1 AND image_id=$2`, me.ID, id); err != nil {
 			return err
 		}
-		s.audit(c, "annotation.submit", "image", id, map[string]any{
-			"kind": kind, "version": newVersion, "total": total,
-		})
 		return nil
 	})
 	if err != nil {
 		httpx.Fail(c, err)
+		return
+	}
+	if duplicate {
+		httpx.OK(c, gin.H{"duplicate": true, "version": newVersion, "total": total})
 		return
 	}
 	op := "annotation.submit"

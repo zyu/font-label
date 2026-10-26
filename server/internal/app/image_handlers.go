@@ -95,9 +95,11 @@ func (s *Server) handleGetImage(c *gin.Context) {
 	dto := s.toDTO(row)
 	var draft any
 	var raw string
-	if err := s.pool().QueryRow(ctx,
-		`SELECT payload::text FROM drafts WHERE user_id=$1 AND image_id=$2`, me.ID, id).Scan(&raw); err == nil {
-		_ = json.Unmarshal([]byte(raw), &draft)
+	if row.Status == "assigned" || row.Status == "rejected" {
+		if err := s.pool().QueryRow(ctx,
+			`SELECT payload::text FROM drafts WHERE user_id=$1 AND image_id=$2`, me.ID, id).Scan(&raw); err == nil {
+			_ = json.Unmarshal([]byte(raw), &draft)
+		}
 	}
 	reviews, err := s.reviewsOf(ctx, id)
 	if err != nil {

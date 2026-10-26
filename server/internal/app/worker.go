@@ -95,9 +95,7 @@ func (s *Server) runPendingExports(ctx context.Context) error {
 		}
 		if err := s.runExportJob(j.id, j.userID, j.format, []byte(j.filters)); err != nil {
 			slog.Error("export job failed", "id", j.id, "err", err)
-			_, _ = s.pool().Exec(ctx,
-				`UPDATE export_jobs SET status='failed', error=$2, finished_at=now() WHERE id=$1`,
-				j.id, err.Error())
+			s.failExportJob(ctx, j.id, err)
 		}
 	}
 	return nil

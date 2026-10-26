@@ -17,7 +17,7 @@ import {
   message,
 } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { STATUS_COLOR, STATUS_LABEL, type ClaimResult, type FolderDTO, type ImageDTO, type Page } from "../api/types";
 import { useAuth } from "../auth";
@@ -32,8 +32,11 @@ const TABS = [
 export default function WorkbenchPage() {
   const { me } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
+  const [params, setParams] = useSearchParams();
   const qc = useQueryClient();
-  const [tab, setTab] = useState("active");
+  const tab = TABS.some((item) => item.value === params.get("tab")) ? params.get("tab")! : "active";
+  const setTab = (value: string) => setParams({ tab: value });
   const [count, setCount] = useState(me?.limits.claim_default_count ?? 10);
 
   const folders = useQuery({
@@ -70,11 +73,11 @@ export default function WorkbenchPage() {
             (res.remaining_in_pool > 0 ? `，文件夹里还剩 ${res.remaining_in_pool} 张，完成后再领` : ""),
         );
         setTab("active");
-        if (res.images.length > 0) nav(`/workbench/${res.images[0].id}`);
+        if (res.images.length > 0) nav(`/workbench/${res.images[0].id}`, { state: { returnTo: "/workbench?tab=active" } });
       } else {
         message.success(`已领取 ${res.granted} 张`);
         setTab("active");
-        if (res.images.length > 0) nav(`/workbench/${res.images[0].id}`);
+        if (res.images.length > 0) nav(`/workbench/${res.images[0].id}`, { state: { returnTo: "/workbench?tab=active" } });
       }
       qc.invalidateQueries({ queryKey: ["my-tasks"] });
       qc.invalidateQueries({ queryKey: ["my-counts"] });
@@ -95,8 +98,7 @@ export default function WorkbenchPage() {
   });
 
   function openTask(row: ImageDTO) {
-    if (row.status === "rejected" || row.status === "assigned") nav(`/workbench/${row.id}`);
-    else nav(`/workbench/${row.id}`);
+    nav(`/workbench/${row.id}`, { state: { returnTo: `${location.pathname}${location.search}` } });
   }
 
   const columns = [
@@ -137,7 +139,10 @@ export default function WorkbenchPage() {
       dataIndex: "comment",
       ellipsis: true,
       render: (v: string, row: ImageDTO) =>
-        row.kind === "exception" ? <Tag color="orange">异常：{row.exception_reasons?.length ?? 0} 项</Tag> : v || "-",
+        row.kind === "exception" ? <Space size={4} wrap>
+          {(row.exception_reasons ?? []).map((reason) => <Tag key={reason} color="orange">{me?.exception_reasons.find((item) => item.key === reason)?.label ?? reason}</Tag>)}
+          {v && <span>{v}</span>}
+        </Space> : v || "-",
     },
     {
       title: "操作",

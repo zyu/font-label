@@ -18,6 +18,7 @@ interface Props {
   /** 一次只上报一个维度，父组件用函数式更新，快速连改不会丢 */
   onPick: (dimKey: string, score: number) => void;
   hotkeyDim: string | null;
+  disabled?: boolean;
 }
 
 /** 打分粒度：0/5/10/15/20 */
@@ -41,7 +42,7 @@ export function clampScore(
  * 每维 0~max（现行 20 分）。用「滑杆 + 数字框」而不是 0~20 的按钮墙：
  * 21 个按钮一排既点不准，也放不下五个维度。
  */
-export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
+export default function ScorePanel({ dims, value, onPick, hotkeyDim, disabled = false }: Props) {
   const stepOf = (d: Dim) => (d.step && d.step > 1 ? d.step : SCORE_STEP);
   return (
     <>
@@ -52,6 +53,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
         const max = d.max || 20;
         const step = stepOf(d);
         const commit = (input: number | string | null) => {
+          if (disabled) return;
           const next = clampScore(input, max, step) ?? clampScore(cur, max, step);
           if (next !== null) onPick(d.key, next);
         };
@@ -71,6 +73,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
               </Tooltip>
             </div>
             <Slider
+              disabled={disabled}
               min={0}
               max={max}
               step={step}
@@ -80,6 +83,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim }: Props) {
               style={{ flex: 1, margin: "0 10px" }}
             />
             <InputNumber
+              disabled={disabled}
               size="small"
               min={0}
               max={max}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
+  Alert,
   Card,
   Dropdown,
   Empty,
@@ -22,7 +23,7 @@ import {
   SendOutlined,
 } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { Draft, ImageDTO, ImageDetail, Page, Review } from "../api/types";
 import { useAuth } from "../auth";
@@ -32,6 +33,7 @@ import ExceptionPanel from "../components/ExceptionPanel";
 import ExampleDrawer from "../components/ExampleDrawer";
 import { dimCommentStates, dimCommentsOk, firstBlockingDimComment } from "../lib/dimComments";
 import { createSubmitId } from "../lib/submitId";
+import { STATUS_LABEL } from "../api/types";
 
 const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
@@ -48,6 +50,8 @@ export default function AnnotatePage() {
 
 function AnnotationEditor({ id }: { id: number }) {
   const nav = useNavigate();
+  const location = useLocation();
+  const returnTo = location.state?.returnTo?.startsWith("/workbench?") ? location.state.returnTo : "/workbench";
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
@@ -61,7 +65,7 @@ function AnnotationEditor({ id }: { id: number }) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
   const [shortcutSubmit, setShortcutSubmit] = useState(false);
-  const [initialized, setInitialized] = useState<number | null>(null);
+  const [initialized, setInitialized] = useState<string | null>(null);
   const startedAt = useRef<number>(Date.now());
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const draftSaves = useRef<Promise<unknown>>(Promise.resolve());
@@ -85,16 +89,17 @@ function AnnotationEditor({ id }: { id: number }) {
   });
 
   const image = detail.data?.image;
+  const canEdit = image?.status === "assigned" || image?.status === "rejected";
 
   useEffect(() => {
-    if (!image || initialized === image.id) return;
-    const draft = detail.data?.draft;
-    setScores(snapToStep(rubric.dims, draft?.scores ?? image.scores ?? {}));
+    if (!image || initialized === `${image.id}:${image.status}`) return;
+    const draft = canEdit ? detail.data?.draft : null;
+    setScores(canEdit ? snapToStep(rubric.dims, draft?.scores ?? image.scores ?? {}) : image.scores ?? {});
     setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
-    setInitialized(image.id);
+    setInitialized(`${image.id}:${image.status}`);
     startedAt.current = Date.now();
-  }, [image, detail.data?.draft, initialized, rubric.dims]);
+  }, [image, detail.data?.draft, initialized, rubric.dims, canEdit]);
 
   const total = useMemo(() => computeTotal(rubric.dims, scores), [rubric.dims, scores]);
   const complete = rubric.dims.every((d) => scores[d.key] !== undefined);
@@ -119,6 +124,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
   const saveDraft = useCallback(
     (payload: Draft) => {
+      if (!canEdit) return Promise.resolve();
       // Serialize autosave and explicit save so an older request cannot win.
       const saved = draftSaves.current.catch(() => undefined).then(async () => {
         await qc.cancelQueries({ queryKey: ["image", id] });
@@ -129,18 +135,18 @@ function AnnotationEditor({ id }: { id: number }) {
       draftSaves.current = saved;
       return saved;
     },
-    [id, qc],
+    [id, qc, canEdit],
   );
 
   useEffect(() => {
-    if (!dirty || !image || submitting.current) return;
+    if (!canEdit || !dirty || !image || submitting.current) return;
     draftTimer.current = setTimeout(() => {
       saveDraft({ kind: "score", scores, dim_comments: dimComments }).catch((e) => {
         message.error(e instanceof ApiError ? e.message : "草稿保存失败，请重试");
       });
     }, 1000);
     return () => clearTimeout(draftTimer.current);
-  }, [dirty, scores, dimComments, image, saveDraft]);
+  }, [dirty, scores, dimComments, image, saveDraft, canEdit]);
 
   const submit = useMutation({
     mutationFn: async (payload: Record<string, unknown>) => {
@@ -158,20 +164,21 @@ function AnnotationEditor({ id }: { id: number }) {
       const list = queue.data ?? [];
       const idx = list.findIndex((x) => x.id === id);
       const next = idx >= 0 ? list[idx + 1] : undefined;
-      if (me?.limits.auto_next && next) nav(`/workbench/${next.id}`);
-      else nav("/workbench");
+      if (me?.limits.auto_next && next) nav(`/workbench/${next.id}`, { state: location.state });
+      else nav(returnTo);
     },
     onError: (e) => message.error(e instanceof Error ? e.message : "提交失败，请重试"),
     onSettled: () => { submitting.current = false; },
   });
 
   function send(payload: Record<string, unknown>) {
-    if (submitting.current) return;
+    if (!canEdit || submitting.current) return;
     submitting.current = true;
     submit.mutate(payload);
   }
 
   function doSubmit() {
+    if (!canEdit) return;
     if (!complete) {
       message.warning(`五个维度都要打分才能提交（还差 ${rubric.dims.filter((d) => scores[d.key] === undefined).length} 个）`);
       return;
@@ -198,12 +205,16 @@ function AnnotationEditor({ id }: { id: number }) {
 
   const list = queue.data ?? [];
   const idx = list.findIndex((x) => x.id === id);
-  const prev = idx > 0 ? list[idx - 1] : undefined;
-  const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
+  const prev = canEdit && idx > 0 ? list[idx - 1] : undefined;
+  const next = canEdit && idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
 
   function go(target?: ImageDTO) {
-    if (!target || submitting.current) return;
-    if (dirty) {
+    if (target) navigateTo(`/workbench/${target.id}`);
+  }
+
+  function navigateTo(path: string) {
+    if (submitting.current) return;
+    if (canEdit && dirty) {
       const confirm = Modal.confirm({
         title: "当前标注还没提交",
         content: "切换前会把当前内容保存为草稿（仅你可见）。",
@@ -214,14 +225,14 @@ function AnnotationEditor({ id }: { id: number }) {
           confirm.update({ okButtonProps: { loading: true }, cancelButtonProps: { disabled: true } });
           saveDraft({ kind: "score", scores, dim_comments: dimComments }).then(() => {
             close();
-            nav(`/workbench/${target.id}`);
+            nav(path, { state: location.state });
           }).catch((e) => {
             message.error(e instanceof ApiError ? e.message : "草稿保存失败，请重试");
           }).finally(() => confirm.update({ okButtonProps: { loading: false }, cancelButtonProps: { disabled: false } }));
         },
       });
     } else {
-      nav(`/workbench/${target.id}`);
+      nav(path, { state: location.state });
     }
   }
 
@@ -232,14 +243,14 @@ function AnnotationEditor({ id }: { id: number }) {
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName);
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
-        setShortcutSubmit(true);
+        if (canEdit) setShortcutSubmit(true);
         return;
       }
       if (typing) return;
       if (e.key === "ArrowLeft") go(prev);
       if (e.key === "ArrowRight") go(next);
       if (e.key === "?") setHelpOpen(true);
-      if (e.key.toLowerCase() === "e") setExcOpen(true);
+      if (canEdit && e.key.toLowerCase() === "e") setExcOpen(true);
       // A/S/D/F/G：按维度顺序跳到分数框，直接键入 0~20
       const focusDim = (i: number) => {
         const d = rubric.dims[i];
@@ -277,6 +288,7 @@ function AnnotationEditor({ id }: { id: number }) {
     <div className="annotate-shell">
       <div className="annotate-top">
         <Space size={14} wrap>
+          <Button aria-label="返回列表" icon={<ArrowLeftOutlined />} onClick={() => navigateTo(returnTo)} disabled={submit.isPending}>返回列表</Button>
           <Tag color="blue">{image.folder}</Tag>
           <Typography.Text strong>{image.stored_name}</Typography.Text>
           <Typography.Text type="secondary">
@@ -305,6 +317,15 @@ function AnnotationEditor({ id }: { id: number }) {
 
         <div className="panel-card">
           <div className="panel-scroll">
+          {!canEdit && <Alert type="info" showIcon title={`${STATUS_LABEL[image.status] || image.status} · 只读，不能修改或提交`} style={{ marginBottom: 12 }} />}
+          {image.kind === "exception" && (
+            <Alert type="warning" showIcon title="异常原因" style={{ marginBottom: 12 }} description={
+              <Space direction="vertical" size={4}>
+                {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{me?.exception_reasons.find((item) => item.key === reason)?.label ?? reason}</span>)}
+                {image.comment && <span>备注：{image.comment}</span>}
+              </Space>
+            } />
+          )}
           {lastReject && (
             <div className="reject-card">
               <div className="who">
@@ -327,7 +348,7 @@ function AnnotationEditor({ id }: { id: number }) {
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}>
             <Tag color="blue">{image.folder}</Tag>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              序号 {image.seq} · {image.status === "rejected" ? "已打回" : "标注中"}
+              序号 {image.seq} · {STATUS_LABEL[image.status] || image.status}
             </Typography.Text>
             <Typography.Text type="secondary" style={{ fontSize: 12, maxWidth: 210, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={image.orig_name}>
               原图：{image.orig_name}
@@ -335,9 +356,11 @@ function AnnotationEditor({ id }: { id: number }) {
           </div>
 
           <ScorePanel
+            disabled={!canEdit}
             dims={rubric.dims}
             value={scores}
             onPick={(dimKey, n) => {
+              if (!canEdit) return;
               setScores((prevScores) => ({ ...prevScores, [dimKey]: n }));
               setDirty(true);
             }}
@@ -365,9 +388,11 @@ function AnnotationEditor({ id }: { id: number }) {
                   <div style={{ width: 100, fontSize: 13, color: "#44506a", flex: "0 0 auto" }}>
                     <div>{s.label} · {scores[s.key] ?? "—"}/{rubric.dims.find((d) => d.key === s.key)?.max}</div>
                     <Dropdown
+                      disabled={!canEdit}
                       menu={{
                         items: (me?.comment_templates ?? []).map((text, i) => ({ key: String(i), label: text })),
                         onClick: ({ key }) => {
+                          if (!canEdit) return;
                           const text = me?.comment_templates?.[Number(key)];
                           if (!text) return;
                           setDimComments((prev) => {
@@ -378,17 +403,19 @@ function AnnotationEditor({ id }: { id: number }) {
                         },
                       }}
                     >
-                      <Button size="small" type="link" aria-label={`${s.label}常用评语`}>常用评语 ▾</Button>
+                      <Button disabled={!canEdit} size="small" type="link" aria-label={`${s.label}常用评语`}>常用评语 ▾</Button>
                     </Dropdown>
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <Input.TextArea
+                      readOnly={!canEdit}
                       rows={1}
                       maxLength={dimMax}
                       value={dimComments[s.key] ?? ""}
                       placeholder={`写清这一维的问题，${dimMin}~${dimMax} 字`}
                       data-test={`dim-comment-${s.key}`}
                       onChange={(e) => {
+                        if (!canEdit) return;
                         const v = e.target.value;
                         setDimComments((prev) => ({ ...prev, [s.key]: v }));
                         setDirty(true);
@@ -417,6 +444,7 @@ function AnnotationEditor({ id }: { id: number }) {
                   style={{ width: "100%" }}
                   icon={<SendOutlined />}
                   loading={submit.isPending}
+                  disabled={!canEdit}
                   onClick={doSubmit}
                   data-test="submit"
                 >
@@ -426,6 +454,7 @@ function AnnotationEditor({ id }: { id: number }) {
             </Tooltip>
             <Tooltip title="这张图不能打分时使用（E）">
               <Button
+                disabled={!canEdit}
                 danger
                 size="large"
                 icon={<ExclamationCircleOutlined />}
@@ -440,7 +469,7 @@ function AnnotationEditor({ id }: { id: number }) {
       </div>
 
       <ExceptionPanel
-        open={excOpen}
+        open={canEdit && excOpen}
         reasons={me?.exception_reasons ?? []}
         loading={submit.isPending}
         onCancel={() => setExcOpen(false)}
