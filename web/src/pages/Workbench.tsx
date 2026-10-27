@@ -20,6 +20,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { STATUS_COLOR, STATUS_LABEL, type ClaimResult, type FolderDTO, type ImageDTO, type Page } from "../api/types";
+import { exceptionReasons } from "../lib/settings";
 import { useAuth } from "../auth";
 
 const TABS = [
@@ -140,7 +141,7 @@ export default function WorkbenchPage() {
       ellipsis: true,
       render: (v: string, row: ImageDTO) =>
         row.kind === "exception" ? <Space size={4} wrap>
-          {(row.exception_reasons ?? []).map((reason) => <Tag key={reason} color="orange">{me?.exception_reasons.find((item) => item.key === reason)?.label ?? reason}</Tag>)}
+          {(row.exception_reasons ?? []).map((reason) => <Tag key={reason} color="orange">{exceptionReasons(me?.exception_reasons).find((item) => item.key === reason)?.label ?? reason}</Tag>)}
           {v && <span>{v}</span>}
         </Space> : v || "-",
     },

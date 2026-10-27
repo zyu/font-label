@@ -173,16 +173,9 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 	httpx.OK(c, gin.H{"settings": out})
 }
 
-var writableSettings = map[string]bool{
-	"lock_ttl_hours": true, "max_hold_per_user": true, "claim_default_count": true,
-	"max_claim_count": true, "max_upload_files": true, "max_file_mb": true,
-	"auto_next_after_submit": true, "exception_reasons": true,
-	"reject_reason_tags": true, "comment_templates": true,
-}
-
 func (s *Server) handlePutSetting(c *gin.Context) {
 	key := c.Param("key")
-	if !writableSettings[key] {
+	if _, ok := settingDefinitions[key]; !ok {
 		httpx.Fail(c, httpx.Validation(map[string]string{"key": "不可修改的配置项"}, "配置项不可写"))
 		return
 	}
@@ -191,12 +184,9 @@ func (s *Server) handlePutSetting(c *gin.Context) {
 		httpx.Fail(c, httpx.BadRequest("配置值必须是合法 JSON"))
 		return
 	}
-	if key == "max_file_mb" {
-		var limit *int
-		if json.Unmarshal(body, &limit) != nil || limit == nil || *limit < 0 || *limit > 1024 {
-			httpx.Fail(c, httpx.Validation(map[string]string{"max_file_mb": "请输入 0~1024 的整数"}, "图片大小上限必须为 0~1024 的整数"))
-			return
-		}
+	if err := validateSetting(key, body); err != nil {
+		httpx.Fail(c, err)
+		return
 	}
 	_, err = s.pool().Exec(c.Request.Context(),
 		`INSERT INTO settings (key, value, updated_at) VALUES ($1,$2::jsonb,now())

@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { ImageDTO, ImageDetail, Page } from "../api/types";
+import { exceptionReasons, stringSetting } from "../lib/settings";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
 import { computeTotal } from "../components/ScorePanel";
@@ -216,7 +217,7 @@ export default function ReviewPage() {
                 <Space direction="vertical" size={2}>
                   {(image.exception_reasons ?? []).map((r) => (
                     <span key={r}>
-                      · {me?.exception_reasons.find((x) => x.key === r)?.label ?? r}
+                      · {exceptionReasons(me?.exception_reasons).find((x) => x.key === r)?.label ?? r}
                     </span>
                   ))}
                   {image.comment && <span>备注：{image.comment}</span>}
@@ -295,7 +296,7 @@ export default function ReviewPage() {
         destroyOnHidden
       >
         <Space size={6} wrap style={{ marginBottom: 10 }}>
-          {(me?.reject_reason_tags ?? []).map((t) => (
+          {stringSetting(me?.reject_reason_tags).map((t) => (
             <Tag.CheckableTag
               key={t}
               checked={tags.includes(t)}

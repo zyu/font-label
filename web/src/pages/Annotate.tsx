@@ -32,6 +32,7 @@ import ScorePanel, { computeTotal, snapToStep } from "../components/ScorePanel";
 import ExceptionPanel from "../components/ExceptionPanel";
 import ExampleDrawer from "../components/ExampleDrawer";
 import { dimCommentStates, dimCommentsOk, firstBlockingDimComment } from "../lib/dimComments";
+import { exceptionReasons, stringSetting } from "../lib/settings";
 import { createSubmitId } from "../lib/submitId";
 import { STATUS_LABEL } from "../api/types";
 
@@ -55,6 +56,8 @@ function AnnotationEditor({ id }: { id: number }) {
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
+  const templates = stringSetting(me?.comment_templates);
+  const reasons = exceptionReasons(me?.exception_reasons);
 
   const [scores, setScores] = useState<Record<string, number>>({});
   // 五维各自的点评：{ white: "...", black: "..." }
@@ -345,7 +348,7 @@ function AnnotationEditor({ id }: { id: number }) {
           {image.kind === "exception" && (
             <Alert type="warning" showIcon title="异常原因" style={{ marginBottom: 12 }} description={
               <Space direction="vertical" size={4}>
-                {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{me?.exception_reasons.find((item) => item.key === reason)?.label ?? reason}</span>)}
+                {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{reasons.find((item) => item.key === reason)?.label ?? reason}</span>)}
                 {image.comment && <span>备注：{image.comment}</span>}
               </Space>
             } />
@@ -414,10 +417,10 @@ function AnnotationEditor({ id }: { id: number }) {
                     <Dropdown
                       disabled={!canEdit}
                       menu={{
-                        items: (me?.comment_templates ?? []).map((text, i) => ({ key: String(i), label: text })),
+                        items: templates.map((text, i) => ({ key: String(i), label: text })),
                         onClick: ({ key }) => {
                           if (!canEdit) return;
-                          const text = me?.comment_templates?.[Number(key)];
+                          const text = templates[Number(key)];
                           if (!text) return;
                           setDimComments((prev) => {
                             const current = prev[s.key] ?? "";
@@ -494,7 +497,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
       <ExceptionPanel
         open={canEdit && excOpen}
-        reasons={me?.exception_reasons ?? []}
+        reasons={reasons}
         loading={submit.isPending}
         onCancel={() => setExcOpen(false)}
         onSubmit={(reasons, note) =>

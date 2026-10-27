@@ -115,7 +115,7 @@ func (s *Server) handleMe(c *gin.Context) {
 			"max_claim_count":     s.settingInt(ctx, "max_claim_count", 100),
 			"max_upload_files":    s.settingInt(ctx, "max_upload_files", 200),
 			"max_file_mb":         s.settingInt(ctx, "max_file_mb", int(s.cfg.MaxFileMB)),
-			"auto_next":           s.settingInt(ctx, "auto_next_after_submit", 1) == 1,
+			"auto_next":           s.settingBool(ctx, "auto_next_after_submit", true),
 		},
 	})
 }

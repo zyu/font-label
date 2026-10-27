@@ -54,6 +54,9 @@ func (s *Server) settingInt(ctx context.Context, key string, def int) int {
 	if err != nil {
 		return def
 	}
+	if validateSetting(key, []byte(raw)) != nil {
+		return def
+	}
 	var n int
 	if err := json.Unmarshal([]byte(raw), &n); err != nil {
 		return def
@@ -66,9 +69,20 @@ func (s *Server) settingValue(ctx context.Context, key string) any {
 	if err := s.pool().QueryRow(ctx, `SELECT value::text FROM settings WHERE key=$1`, key).Scan(&raw); err != nil {
 		return nil
 	}
+	if validateSetting(key, []byte(raw)) != nil {
+		return nil
+	}
 	var v any
 	_ = json.Unmarshal([]byte(raw), &v)
 	return v
+}
+
+func (s *Server) settingBool(ctx context.Context, key string, def bool) bool {
+	value, ok := s.settingValue(ctx, key).(bool)
+	if !ok {
+		return def
+	}
+	return value
 }
 
 // ---------- rubric ----------

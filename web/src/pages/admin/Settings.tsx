@@ -18,12 +18,12 @@ import { api, ApiError } from "../../api/client";
 import type { Rubric } from "../../api/types";
 import { useAuth } from "../../auth";
 
-const NUM_KEYS: { key: string; label: string; hint: string }[] = [
-  { key: "lock_ttl_hours", label: "领取有效期（小时）", hint: "超时未提交自动回收" },
-  { key: "max_hold_per_user", label: "每人未提交上限", hint: "防止囤任务" },
-  { key: "claim_default_count", label: "按张领取默认数量", hint: "" },
-  { key: "max_claim_count", label: "单次领取上限", hint: "" },
-  { key: "max_file_mb", label: "单张图片大小上限（MB）", hint: "上传时校验" },
+const NUM_KEYS: { key: string; label: string; hint: string; min: number; max: number }[] = [
+  { key: "lock_ttl_hours", label: "领取有效期（小时）", hint: "超时未提交自动回收（1~8760 小时）", min: 1, max: 8760 },
+  { key: "max_hold_per_user", label: "每人未提交上限", hint: "防止囤任务（1~10000 张）", min: 1, max: 10000 },
+  { key: "claim_default_count", label: "按张领取默认数量", hint: "1~10000 张", min: 1, max: 10000 },
+  { key: "max_claim_count", label: "单次领取上限", hint: "1~10000 张", min: 1, max: 10000 },
+  { key: "max_file_mb", label: "单张图片大小上限（MB）", hint: "上传时校验（0~1024 MB）", min: 0, max: 1024 },
 ];
 
 export default function SettingsPage() {
@@ -154,7 +154,7 @@ export default function SettingsPage() {
           <InputNumber min={1} max={200} value={commentMin} onChange={(v) => setCommentMin(Number(v ?? 10))} />
           <span>上限</span>
           <InputNumber min={10} max={500} value={commentMax} onChange={(v) => setCommentMax(Number(v ?? 50))} />
-          <Typography.Text type="secondary">等级线：优秀 ≥90 / 良好 80~89 / 中等 60~79 / 较差 &lt;60</Typography.Text>
+          <Typography.Text type="secondary">等级线：优秀 ≥90 / 良好 80~89 / 中等 70~79 / 及格 60~69 / 需加油 &lt;60</Typography.Text>
         </Space>
       </Card>
 
@@ -178,7 +178,9 @@ export default function SettingsPage() {
               <div style={{ marginBottom: 4 }}>{k.label}</div>
               <Space>
                 <InputNumber
-                  min={0}
+                  min={k.min}
+                  max={k.max}
+                  precision={0}
                   value={Number(settings[k.key] ?? 0)}
                   onChange={(v) => setSettings((prev) => ({ ...prev, [k.key]: Number(v ?? 0) }))}
                 />

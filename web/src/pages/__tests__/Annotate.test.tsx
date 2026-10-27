@@ -11,7 +11,7 @@ const dims = ["white", "black", "variation", "structure", "control"].map((key) =
 const comments = Object.fromEntries(dims.map((d) => [d.key, `${d.key}：撇捺左右空白大致匀，重心稳定。`]));
 let showScorePanel = false;
 const scores = Object.fromEntries(dims.map((d) => [d.key, 20]));
-const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: ["撇捺左右空白大致匀，重心稳定。"], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
+const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }, { min: 80, label: "良好" }, { min: 70, label: "中等" }, { min: 60, label: "及格" }, { min: 0, label: "需加油" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: ["撇捺左右空白大致匀，重心稳定。"], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
 vi.mock("../../auth", () => ({ useAuth: () => ({ me }) }));
 vi.mock("../../components/ExampleDrawer", () => ({ default: () => null }));
 vi.mock("../../components/ImageViewer", () => ({ default: ({ src }: { src: string }) => <img src={src} alt="标注原图" /> }));
@@ -274,5 +274,42 @@ describe("标注交互回归", () => {
   it("标注使用原图保证放大细节", () => {
     mount();
     expect(screen.getByAltText("标注原图")).toHaveAttribute("src", "/original/1");
+  });
+});
+
+describe("异常配置容错", () => {
+  it.each([null, { value: [] }, { a: 1 }, [1, 2, 3], [{ x: 1 }], "yes", [null], ["有效评语", { x: 1 }]].map((value) => ({ value })))("配置 $value 不应让标注页崩溃", async ({ value: badValue }) => {
+    const originalTemplates = me.comment_templates;
+    const originalReasons = me.exception_reasons;
+    me.comment_templates = badValue as unknown as MeResponse["comment_templates"];
+    me.exception_reasons = badValue as unknown as MeResponse["exception_reasons"];
+    try {
+      mount();
+      expect(await screen.findByText("test1.png")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: /异常/ }));
+      expect(await screen.findByText("上报异常（不打分）")).toBeInTheDocument();
+    } finally {
+      me.comment_templates = originalTemplates;
+      me.exception_reasons = originalReasons;
+    }
+  });
+});
+
+
+describe("表5总分档位", () => {
+  it.each([
+    [[10, 10, 10, 15, 5], 50, "需加油"],
+    [[10, 10, 10, 15, 15], 60, "及格"],
+    [[10, 10, 15, 15, 15], 65, "及格"],
+    [[10, 15, 15, 15, 15], 70, "中等"],
+    [[20, 15, 15, 15, 15], 80, "良好"],
+    [[20, 20, 20, 15, 15], 90, "优秀"],
+  ] as const)("%j 总分 %s 显示 %s", async (values, total, grade) => {
+    const imageDetail = detail(1);
+    imageDetail.image.scores = Object.fromEntries(dims.map((d, i) => [d.key, values[i]]));
+    mount(true, imageDetail);
+    expect(await screen.findByText(total.toFixed(1))).toBeInTheDocument();
+    expect(screen.getByText(grade, { exact: true })).toBeInTheDocument();
   });
 });

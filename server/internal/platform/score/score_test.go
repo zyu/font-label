@@ -17,8 +17,9 @@ func fiveDimRubric() Rubric {
 		Bands: []Band{
 			{Label: "优秀", Min: 90},
 			{Label: "良好", Min: 80},
-			{Label: "中等", Min: 60},
-			{Label: "较差", Min: 0},
+			{Label: "中等", Min: 70},
+			{Label: "及格", Min: 60},
+			{Label: "需加油", Min: 0},
 		},
 		CommentMin: 20,
 		CommentMax: 50,
@@ -49,14 +50,14 @@ func TestFiveDimTotalIsPlainSum(t *testing.T) {
 			75, "中等",
 		},
 		{
-			"全 10 = 50 较差",
+			"全 10 = 50 需加油",
 			map[string]int{"white": 10, "black": 10, "variation": 10, "structure": 10, "control": 10},
-			50, "较差",
+			50, "需加油",
 		},
 		{
 			"零分",
 			map[string]int{"white": 0, "black": 0, "variation": 0, "structure": 0, "control": 0},
-			0, "较差",
+			0, "需加油",
 		},
 	}
 	for _, tc := range cases {
@@ -127,7 +128,7 @@ func TestGradeBands(t *testing.T) {
 	for _, tc := range []struct {
 		total float64
 		want  string
-	}{{100, "优秀"}, {90, "优秀"}, {89.5, "良好"}, {80, "良好"}, {79.5, "中等"}, {60, "中等"}, {59.5, "较差"}} {
+	}{{100, "优秀"}, {90, "优秀"}, {89.5, "良好"}, {80, "良好"}, {79.5, "中等"}, {70, "中等"}, {69.9, "及格"}, {60, "及格"}, {59.9, "需加油"}, {50, "需加油"}, {0, "需加油"}} {
 		if got := r.Grade(tc.total); got != tc.want {
 			t.Errorf("Grade(%v) = %v, want %v", tc.total, got, tc.want)
 		}
