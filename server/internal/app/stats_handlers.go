@@ -277,8 +277,11 @@ func (s *Server) handleStatsMe(c *gin.Context) {
 		`SELECT COALESCE(avg(total),0) FROM annotations WHERE annotator_id=$1 AND kind='score'`,
 		me.ID).Scan(&avgTotal)
 	var rejectEvents int
-	_ = s.pool().QueryRow(ctx,
-		`SELECT COALESCE(sum(reject_count),0)::int FROM images WHERE annotator_id=$1`, me.ID).Scan(&rejectEvents)
+	if err := s.pool().QueryRow(ctx, `WITH `+reviewStatsCTE+`
+		SELECT COALESCE((SELECT reject_events FROM review_stats WHERE annotator_id=$1),0)::int`, me.ID).Scan(&rejectEvents); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
 	httpx.OK(c, gin.H{
 		"holding": holding, "rejected": rejected, "approved": approved,
 		"pending": pending, "submitted_today": submittedToday,

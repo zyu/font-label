@@ -1,6 +1,8 @@
 package app
 
 import (
+	"sort"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -136,6 +138,9 @@ func (s *Server) handleClaim(c *gin.Context) {
 		return
 	}
 
+	// UPDATE ... RETURNING has no ordering guarantee. Match the task queue's
+	// ID tie-breaker so opening the first claimed image starts at the batch head.
+	sort.Slice(claimed, func(i, j int) bool { return claimed[i].ID < claimed[j].ID })
 	var remaining int
 	_ = s.pool().QueryRow(ctx,
 		`SELECT count(*) FROM images WHERE status='unassigned' AND ($1::bigint = 0 OR folder_id=$1)`,
@@ -213,9 +218,9 @@ func (s *Server) handleMyTasks(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	order := "i.claimed_at ASC"
+	order := "i.claimed_at ASC NULLS LAST, i.id ASC"
 	if status != "active" {
-		order = "i.submitted_at DESC NULLS LAST"
+		order = "i.submitted_at DESC NULLS LAST, i.id DESC"
 	}
 	rows, err := s.pool().Query(ctx,
 		imageSelect+` WHERE `+clause+` ORDER BY `+order+` LIMIT $2 OFFSET $3`,

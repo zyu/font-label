@@ -80,11 +80,19 @@ function AnnotationEditor({ id }: { id: number }) {
   const queue = useQuery({
     queryKey: ["annotate-queue"],
     queryFn: async () => {
+      const tasks = async (status: string) => {
+        const items: ImageDTO[] = [];
+        for (let page = 1; ; page++) {
+          const result = await api.get<Page<ImageDTO>>(`/claims/my?status=${status}&page_size=100&page=${page}`);
+          items.push(...result.items);
+          if (!result.items.length || items.length >= result.total) return items;
+        }
+      };
       const [active, rejected] = await Promise.all([
-        api.get<Page<ImageDTO>>("/claims/my?status=active&page_size=200"),
-        api.get<Page<ImageDTO>>("/claims/my?status=rejected&page_size=200"),
+        tasks("active"),
+        tasks("rejected"),
       ]);
-      return [...rejected.items, ...active.items];
+      return [...rejected, ...active];
     },
   });
 
@@ -154,18 +162,34 @@ function AnnotationEditor({ id }: { id: number }) {
       await draftSaves.current.catch(() => undefined);
       return api.post(`/images/${id}/submit`, { ...payload, client_submit_id: createSubmitId() });
     },
-    onSuccess: () => {
+    onMutate: () => ({ queue: queue.data ?? [] }),
+    onSuccess: async (_data, _payload, context) => {
       message.success("已提交，等待审核");
       qc.invalidateQueries({ queryKey: ["image", id] });
-      qc.invalidateQueries({ queryKey: ["annotate-queue"] });
       qc.invalidateQueries({ queryKey: ["my-counts"] });
       qc.invalidateQueries({ queryKey: ["my-tasks"] });
       setDirty(false);
-      const list = queue.data ?? [];
-      const idx = list.findIndex((x) => x.id === id);
-      const next = idx >= 0 ? list[idx + 1] : undefined;
-      if (me?.limits.auto_next && next) nav(`/workbench/${next.id}`, { state: location.state });
-      else nav(returnTo);
+      if (!me?.limits.auto_next) {
+        qc.invalidateQueries({ queryKey: ["annotate-queue"] });
+        nav(returnTo);
+        return;
+      }
+      try {
+        const refreshed = await queue.refetch({ throwOnError: true });
+        const remaining = (refreshed.data ?? []).filter((item) => item.id !== id);
+        const available = new Map(remaining.map((item) => [item.id, item]));
+        const previous = context?.queue ?? [];
+        const idx = previous.findIndex((item) => item.id === id);
+        // Prefer the previous successor if it is still available. At the tail,
+        // or if the current image disappeared, use the refreshed queue's head.
+        const candidates = idx < 0 ? [] : previous.slice(idx + 1);
+        const next = candidates.find((item) => available.has(item.id)) ?? remaining[0];
+        if (next) nav(`/workbench/${next.id}`, { state: location.state });
+        else nav(returnTo);
+      } catch {
+        message.warning("已提交，队列刷新失败，请从工作台继续标注");
+        nav(returnTo);
+      }
     },
     onError: (e) => message.error(e instanceof Error ? e.message : "提交失败，请重试"),
     onSettled: () => { submitting.current = false; },

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Table, Tag, Tooltip, Typography, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { FolderDTO } from "../../api/types";
@@ -93,8 +93,10 @@ export default function FoldersPage() {
               ),
             },
             { title: "待领取", dataIndex: "unassigned", width: 80 },
+            { title: "标注中", dataIndex: "assigned", width: 80 },
             { title: "待审核", dataIndex: "submitted", width: 80 },
             { title: "已通过", dataIndex: "approved", width: 80 },
+            { title: "无效图", dataIndex: "excluded", width: 80 },
             { title: "已打回", dataIndex: "rejected", width: 80 },
             { title: "创建人", dataIndex: "creator", width: 110 },
             {
@@ -128,6 +130,9 @@ export default function FoldersPage() {
             },
           ]}
         />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          完成进度 =（已通过 + 无效图）/ 总数；异常上报须审核确认后计入无效图，待审异常计入待审核。
+        </Typography.Text>
       </Card>
 
       <Modal

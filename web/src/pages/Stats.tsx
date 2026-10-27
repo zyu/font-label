@@ -103,7 +103,7 @@ export default function StatsPage() {
         <Row gutter={14}>
           {[
             ["待完成", m?.holding ?? 0, "#2b5cff"],
-            ["被驳回", m?.rejected ?? 0, "#cf1322"],
+            ["累计驳回（次）", m?.reject_events ?? 0, "#cf1322"],
             ["待审核", m?.pending ?? 0, "#fa8c16"],
             ["已通过", m?.approved ?? 0, "#389e0d"],
             ["今日提交", m?.submitted_today ?? 0, "#722ed1"],
@@ -121,7 +121,8 @@ export default function StatsPage() {
         </Row>
         <Card size="small" title="我的情况">
           <Typography.Paragraph>
-            累计领取 <b>{m?.granted ?? 0}</b> 张；被驳回 <b>{m?.reject_events ?? 0}</b> 次。
+            累计领取 <b>{m?.granted ?? 0}</b> 张；累计被驳回 <b>{m?.reject_events ?? 0}</b> 次。
+            当前待重做 <b>{m?.rejected ?? 0}</b> 张。
             驳回后请到「标注工作台 · 已驳回」按审核批注修改并重新提交。
           </Typography.Paragraph>
         </Card>
@@ -244,12 +245,18 @@ export default function StatsPage() {
             {
               title: "进度",
               render: (_: unknown, f: FolderDTO) => (
-                <Progress percent={Math.round(((f.total - f.unassigned) / Math.max(1, f.total)) * 100)} size="small" />
+                <Progress
+                  percent={Math.round(((f.approved + f.excluded) / Math.max(1, f.total)) * 100)}
+                  size="small"
+                  format={() => `${f.approved + f.excluded}/${f.total}`}
+                />
               ),
             },
             { title: "待领取", dataIndex: "unassigned", width: 90 },
+            { title: "标注中", dataIndex: "assigned", width: 90 },
             { title: "待审核", dataIndex: "submitted", width: 90 },
             { title: "已通过", dataIndex: "approved", width: 90 },
+            { title: "无效图", dataIndex: "excluded", width: 90 },
             { title: "已打回", dataIndex: "rejected", width: 90 },
             {
               title: "通过率",
@@ -261,6 +268,9 @@ export default function StatsPage() {
             },
           ]}
         />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          完成进度 =（已通过 + 无效图）/ 总数；异常上报须审核确认后计入无效图，待审异常计入待审核。
+        </Typography.Text>
       </Card>
 
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>

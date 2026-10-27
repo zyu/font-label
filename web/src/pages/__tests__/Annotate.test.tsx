@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { message, Modal } from "antd";
-import type { ImageDetail, MeResponse } from "../../api/types";
+import type { ImageDetail, ImageDTO, MeResponse } from "../../api/types";
 import { ApiError, api } from "../../api/client";
 import AnnotatePage from "../Annotate";
 
@@ -25,12 +25,12 @@ function detail(id: number, filled = true): ImageDetail {
   return { image: { id, scores: filled ? scores : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
 }
 
-function mount(filled = true, imageDetail = detail(1, filled)) {
+function mount(filled = true, imageDetail = detail(1, filled), initialQueue: ImageDTO[] = [detail(1).image, detail(2).image]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity }, mutations: { retry: false } } });
-  qc.setQueryData(["image", 1], imageDetail);
-  qc.setQueryData(["image", 2], detail(2, filled));
-  qc.setQueryData(["annotate-queue"], [detail(1).image, detail(2).image]);
-  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={[{ pathname: "/workbench/1", state: { returnTo: "/workbench?tab=approved" } }]}><Routes>
+  for (const image of initialQueue) qc.setQueryData(["image", image.id], detail(image.id, filled));
+  qc.setQueryData(["image", imageDetail.image.id], imageDetail);
+  qc.setQueryData(["annotate-queue"], initialQueue);
+  render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={[{ pathname: `/workbench/${imageDetail.image.id}`, state: { returnTo: "/workbench?tab=approved" } }]}><Routes>
     <Route path="/workbench/:imageId" element={<AnnotatePage />} />
     <Route path="/workbench" element={<div>工作台</div>} />
   </Routes></MemoryRouter></QueryClientProvider>);
@@ -38,6 +38,7 @@ function mount(filled = true, imageDetail = detail(1, filled)) {
 }
 
 beforeEach(() => {
+  me.limits.auto_next = false;
   showScorePanel = false;
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   const getComputedStyle = window.getComputedStyle.bind(window);
@@ -53,6 +54,69 @@ beforeEach(() => {
 afterEach(() => { Modal.destroyAll(); cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("标注交互回归", () => {
+  it("批量领取后即使当前图在缓存队尾，也连续提交完剩余任务才回列表", async () => {
+    me.limits.auto_next = true;
+    let remaining = [detail(1).image, detail(2).image, detail(3).image];
+    vi.mocked(api.get).mockImplementation(async (path) => {
+      if (path.includes("status=active")) return { items: remaining, total: remaining.length };
+      if (path.includes("status=rejected")) return { items: [], total: 0 };
+      return detail(Number(path.split("/").pop()));
+    });
+    vi.mocked(api.post).mockImplementation(async (path) => {
+      remaining = remaining.filter((image) => path !== `/images/${image.id}/submit`);
+      return {};
+    });
+    mount(true, detail(1), [...remaining].reverse());
+    for (const id of [1, 2, 3]) {
+      await screen.findByText(`test${id}.png`);
+      fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+      await waitFor(() => expect(api.post).toHaveBeenCalledWith(`/images/${id}/submit`, expect.anything()));
+    }
+    await screen.findByText("工作台");
+    expect(api.post).toHaveBeenCalledTimes(3);
+  });
+
+  it("提交时当前图已经离开缓存队列，也会刷新后进入剩余任务", async () => {
+    me.limits.auto_next = true;
+    vi.mocked(api.get).mockImplementation(async (path) => {
+      if (path.includes("status=active")) return { items: [detail(2).image], total: 1 };
+      if (path.includes("status=rejected")) return { items: [], total: 0 };
+      return detail(Number(path.split("/").pop()));
+    });
+    mount(true, detail(1), [detail(2).image]);
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    await screen.findByText("test2.png");
+    expect(screen.queryByText("工作台")).not.toBeInTheDocument();
+  });
+
+  it("队列超过接口单页100张时仍能进入第二页的下一张", async () => {
+    me.limits.auto_next = true;
+    vi.mocked(api.get).mockImplementation(async (path) => {
+      if (path.includes("status=rejected")) return { items: [], total: 0 };
+      if (path.includes("status=active")) {
+        return { items: path.endsWith("page=2") ? [detail(102).image] : Array.from({ length: 100 }, (_, index) => detail(index + 1).image), total: 101 };
+      }
+      return detail(Number(path.split("/").pop()));
+    });
+    mount(true, detail(101), [detail(101).image, detail(102).image]);
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    await screen.findByText("test102.png");
+    expect(api.get).toHaveBeenCalledWith("/claims/my?status=active&page_size=100&page=2");
+  });
+
+  it("提交成功后队列刷新失败会提示，避免重复提交", async () => {
+    me.limits.auto_next = true;
+    vi.mocked(api.get).mockImplementation(async (path) => {
+      if (path.startsWith("/claims/my")) throw new Error("队列不可用");
+      return detail(Number(path.split("/").pop()));
+    });
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    await screen.findByText("工作台");
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(message.warning).toHaveBeenCalledWith("已提交，队列刷新失败，请从工作台继续标注");
+  });
+
   it.each(["submitted", "approved", "excluded"] as const)("%s 图片只读，忽略旧草稿，点击和快捷键均不能提交", async (status) => {
     showScorePanel = true;
     const saved = detail(1);
