@@ -298,6 +298,34 @@ describe("异常配置容错", () => {
 
 
 describe("表5总分档位", () => {
+  it.each(["submitted", "approved"] as const)("%s 详情沿用接口保存的总分与档位，不按当前方案重算", async (status) => {
+    const saved = detail(1);
+    // 当前方案计算这些分数为100；历史权重或手填总分可能不同。
+    Object.assign(saved.image, { status, total: 40, grade: "需加油" });
+    mount(true, saved);
+    expect(await screen.findByText("40.0")).toBeInTheDocument();
+    expect(screen.getByText("需加油", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText("100.0")).not.toBeInTheDocument();
+    expect(screen.queryByText("优秀", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("只读详情保留保存时的等级，不随当前等级线变化", async () => {
+    const saved = detail(1);
+    Object.assign(saved.image, { status: "approved", total: 65, grade: "历史等级" });
+    mount(true, saved);
+    expect(await screen.findByText("65.0")).toBeInTheDocument();
+    expect(screen.getByText("历史等级", { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText("及格", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("没有已保存总分的只读记录不根据维度分数编造总分或等级", () => {
+    const saved = detail(1);
+    Object.assign(saved.image, { status: "approved", total: null, grade: "" });
+    mount(true, saved);
+    expect(document.querySelector(".total-num")).toHaveTextContent("--");
+    expect(screen.queryByText("优秀", { exact: true })).not.toBeInTheDocument();
+  });
+
   it.each([
     [[10, 10, 10, 15, 5], 50, "需加油"],
     [[10, 10, 10, 15, 15], 60, "及格"],

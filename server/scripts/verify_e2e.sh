@@ -100,7 +100,7 @@ check "异常提交 kind=exception" "exception" "$(echo "$EXC" | jq -r '.data.ki
 echo "== 10. 第三张正常提交（用于打回重做）=="
 S3=$(curl -s -X POST "$API/images/$IMG3/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
   -d "{\"client_submit_id\":\"55555555-5555-4555-8555-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":10,\"black\":10,\"variation\":10,\"structure\":10,\"control\":10},$DIMC}")
-check "第三张 50 分 较差" "50 较差" "$(echo "$S3" | jq -r '"\(.data.total) \(.data.grade)"')"
+check "第三张 50 分 需加油" "50 需加油" "$(echo "$S3" | jq -r '"\(.data.total) \(.data.grade)"')"
 
 echo "== 11. 审核队列（限本文件夹）=="
 Q=$(curl -s "$API/reviews/queue?folder_id=$FID" -H "Authorization: Bearer $REV")

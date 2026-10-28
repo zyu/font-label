@@ -113,12 +113,14 @@ function AnnotationEditor({ id }: { id: number }) {
   }, [image, detail.data?.draft, initialized, rubric.dims, canEdit]);
 
   const total = useMemo(() => computeTotal(rubric.dims, scores), [rubric.dims, scores]);
-  const complete = rubric.dims.every((d) => scores[d.key] !== undefined);
-  const totalValue = total ?? 0;
+  // 编辑中预览当前方案；只读详情与列表、审核、导出共用服务端保存的结果。
+  const complete = canEdit ? rubric.dims.every((d) => scores[d.key] !== undefined) : image?.total != null;
+  const totalValue = (canEdit ? total : image?.total) ?? 0;
   const grade = useMemo(() => {
+    if (!canEdit) return image?.grade ?? "";
     const bands = [...rubric.grade_bands].sort((a, b) => b.min - a.min);
     return bands.find((b) => totalValue >= b.min)?.label ?? "";
-  }, [rubric.grade_bands, totalValue]);
+  }, [canEdit, image?.grade, rubric.grade_bands, totalValue]);
 
   const dimMin = rubric.dim_comment_min || 10;
   const dimMax = rubric.dim_comment_max || 50;
