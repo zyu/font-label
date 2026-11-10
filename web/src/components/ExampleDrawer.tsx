@@ -18,7 +18,7 @@ const FIGS = [
   { src: "/examples/excellent.png", cap: "图 1｜可以给高分：空白停匀、左右两半重量相当、四周笔画有长有短、结构占位合理、起收笔见轻重" },
   { src: "/examples/medium.png", cap: "图 2｜中等：主要问题在「参差」——短撇没送到格角、长捺偏长，参差与结构各扣几分" },
   { src: "/examples/poor.png", cap: "图 3｜需加油：字缩在一角（结构/白平衡失分），两半重量失衡（黑平衡失分），笔画等粗（控笔失分）" },
-  { src: "/examples/invalid.png", cap: "图 4｜不能打分：倾斜、失焦、过曝、含未打码姓名、手指遮挡 → 上报异常" },
+  { src: "/examples/invalid.png", cap: "图 4｜照片不合格：倾斜、失焦、过曝、含未打码姓名、手指遮挡" },
 ];
 
 export default function ExampleDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {

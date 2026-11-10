@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,5 +73,16 @@ describe("列表和详情往返", () => {
     expect(screen.getByTestId("url")).toHaveTextContent("/review?kind=exception&folder_id=9");
     expect(screen.getByText("test.png")).toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it("审核员可根据不合格原因和备注确认无效图", async () => {
+    mount("/review?kind=exception&folder_id=9", "submitted");
+    expect(screen.getByRole("cell", { name: "照片不合格" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("test.png"));
+    expect(await screen.findByText(/图片模糊/)).toBeInTheDocument();
+    expect(screen.getByText(/需要重拍/)).toBeInTheDocument();
+    expect(screen.queryByText("总分")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认照片不合格" }));
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/review", { action: "approve" }));
   });
 });

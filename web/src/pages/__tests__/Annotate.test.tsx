@@ -127,12 +127,12 @@ describe("标注交互回归", () => {
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue(comments.white);
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /异常/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "照片不合格" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
     fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
     fireEvent.keyDown(window, { key: "e" });
     await act(async () => {});
-    expect(screen.queryByRole("button", { name: "提交异常" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "提交照片不合格" })).not.toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
     expect(api.put).not.toHaveBeenCalled();
   });
@@ -173,9 +173,9 @@ describe("标注交互回归", () => {
     vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
     vi.mocked(api.post).mockRejectedValue(new ApiError(409, "CONFLICT", "任务已被回收"));
     mount();
-    fireEvent.click(screen.getByRole("button", { name: /异常/ }));
+    fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
     fireEvent.click(await screen.findByLabelText("图片模糊"));
-    fireEvent.click(screen.getByRole("button", { name: "提交异常" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "exception", exception_reasons: ["blur"] })));
     await waitFor(() => expect(message.error).toHaveBeenCalledWith("任务已被回收"));
   });
@@ -243,12 +243,42 @@ describe("标注交互回归", () => {
   it("D01：HTTP 环境下异常上报成功后有提示并返回工作台", async () => {
     vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
     mount();
-    fireEvent.click(screen.getByRole("button", { name: /异常/ }));
+    fireEvent.keyDown(window, { key: "e" });
     fireEvent.click(await screen.findByLabelText("图片模糊"));
-    fireEvent.click(screen.getByRole("button", { name: "提交异常" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
     await screen.findByText("工作台");
     expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "exception", client_submit_id: expect.stringMatching(/^[\da-f-]{36}$/) }));
     expect(message.success).toHaveBeenCalledWith("已提交，等待审核");
+  });
+
+  it("可对照不合格示例，并在未打分时选择原因提交", async () => {
+    mount(false);
+    expect(screen.getByText("照片质量检查")).toBeInTheDocument();
+    expect(screen.getByText(/倾斜超过 15°/)).toBeInTheDocument();
+    const exampleToggle = screen.getByText("查看不合格照片示例");
+    fireEvent.click(exampleToggle);
+    expect(exampleToggle.closest("details")).toHaveAttribute("open");
+    expect(screen.getByAltText("不合格照片示例")).toHaveAttribute("src", "/examples/invalid.png");
+    expect(screen.getByAltText("标注原图")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
+    await screen.findByRole("dialog", { name: "标记照片不合格" });
+    fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
+    expect(await screen.findByText("请至少选择一项照片不合格原因")).toBeVisible();
+    expect(api.post).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "图片模糊" }));
+    fireEvent.change(screen.getByPlaceholderText("补充说明（可选）"), { target: { value: "左下角笔画看不清" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
+    await screen.findByText("工作台");
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(api.post).toHaveBeenCalledWith("/images/1/submit", {
+      kind: "exception",
+      exception_reasons: ["blur"],
+      exception_note: "左下角笔画看不清",
+      duration_ms: expect.any(Number),
+      client_submit_id: expect.any(String),
+    });
   });
 
   it("D01：提交标识生成失败也能显示错误，不会静默无反应", async () => {
@@ -287,8 +317,8 @@ describe("异常配置容错", () => {
       mount();
       expect(await screen.findByText("test1.png")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeEnabled();
-      fireEvent.click(screen.getByRole("button", { name: /异常/ }));
-      expect(await screen.findByText("上报异常（不打分）")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
+      expect(await screen.findByRole("dialog", { name: "标记照片不合格" })).toBeInTheDocument();
     } finally {
       me.comment_templates = originalTemplates;
       me.exception_reasons = originalReasons;

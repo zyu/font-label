@@ -40,7 +40,7 @@ const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
   ["← / →", "上一张 / 下一张"],
   ["A / S / D / F / G", "跳到 白平衡 / 黑平衡 / 参差 / 结构 / 控笔 的分数框"],
-  ["E", "上报异常"],
+  ["E", "标记照片不合格"],
   ["?", "显示快捷键"],
 ];
 
@@ -279,7 +279,7 @@ function AnnotationEditor({ id }: { id: number }) {
       if (e.key === "ArrowLeft") go(prev);
       if (e.key === "ArrowRight") go(next);
       if (e.key === "?") setHelpOpen(true);
-      if (canEdit && e.key.toLowerCase() === "e") setExcOpen(true);
+      if (canEdit && !submitting.current && e.key.toLowerCase() === "e") setExcOpen(true);
       // A/S/D/F/G：按维度顺序跳到分数框，直接键入 0~20
       const focusDim = (i: number) => {
         const d = rubric.dims[i];
@@ -348,7 +348,7 @@ function AnnotationEditor({ id }: { id: number }) {
           <div className="panel-scroll">
           {!canEdit && <Alert type="info" showIcon title={`${STATUS_LABEL[image.status] || image.status} · 只读，不能修改或提交`} style={{ marginBottom: 12 }} />}
           {image.kind === "exception" && (
-            <Alert type="warning" showIcon title="异常原因" style={{ marginBottom: 12 }} description={
+            <Alert type="warning" showIcon title="照片不合格原因" style={{ marginBottom: 12 }} description={
               <Space direction="vertical" size={4}>
                 {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{reasons.find((item) => item.key === reason)?.label ?? reason}</span>)}
                 {image.comment && <span>备注：{image.comment}</span>}
@@ -383,6 +383,27 @@ function AnnotationEditor({ id }: { id: number }) {
               原图：{image.orig_name}
             </Typography.Text>
           </div>
+
+          {canEdit && (
+            <Alert
+              type="info"
+              title="照片质量检查"
+              style={{ marginBottom: 12 }}
+              description={
+                <>
+                  <div>打分前先检查照片。倾斜超过 15°、笔画因模糊或曝光异常看不清、文字被遮挡、含未打码的学生信息、无有效书写内容或重复上传，都是常见的不合格情况。</div>
+                  <div>如果照片清楚，只是字写得不好，请按评分标准打分。</div>
+                  <details className="photo-quality-example">
+                    <summary>查看不合格照片示例</summary>
+                    <figure className="guide-fig">
+                      <img src="/examples/invalid.png" alt="不合格照片示例" loading="lazy" />
+                      <figcaption className="cap">这张照片倾斜、失焦，左侧过曝，右上角有未打码的学生信息，且手指挡住了字。</figcaption>
+                    </figure>
+                  </details>
+                </>
+              }
+            />
+          )}
 
           <ScorePanel
             disabled={!canEdit}
@@ -481,16 +502,16 @@ function AnnotationEditor({ id }: { id: number }) {
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip title="这张图不能打分时使用（E）">
+            <Tooltip title="选择照片不合格的原因并提交审核（E）">
               <Button
-                disabled={!canEdit}
+                disabled={!canEdit || submit.isPending}
                 danger
                 size="large"
-                icon={<ExclamationCircleOutlined />}
+                icon={<ExclamationCircleOutlined aria-hidden="true" />}
                 onClick={() => setExcOpen(true)}
                 data-test="exception"
               >
-                异常
+                照片不合格
               </Button>
             </Tooltip>
           </div>

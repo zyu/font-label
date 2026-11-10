@@ -26,14 +26,14 @@ export default function ExceptionPanel({ open, reasons, initial, onCancel, onSub
   return (
     <Modal
       open={open}
-      title="上报异常（不打分）"
-      okText="提交异常"
+      title="标记照片不合格"
+      okText="提交照片不合格"
       cancelText="取消"
       confirmLoading={loading}
       onCancel={onCancel}
       onOk={() => {
         if (picked.length === 0) {
-          setError("请至少选择一项异常原因");
+          setError("请至少选择一项照片不合格原因");
           return;
         }
         onSubmit(picked, note);
@@ -41,16 +41,19 @@ export default function ExceptionPanel({ open, reasons, initial, onCancel, onSub
       destroyOnHidden
     >
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        图片不可评时使用：不打分、不写点评，只勾选原因。审核员会复核异常是否成立。
+        请勾选照片不合格的原因，可补充说明。提交后交给审核员确认，无需填写分数和点评。
       </Typography.Paragraph>
       <Checkbox.Group
         value={picked}
-        onChange={(v) => setPicked(v as string[])}
+        onChange={(v) => {
+          setPicked(v as string[]);
+          setError("");
+        }}
         style={{ display: "flex", flexDirection: "column", gap: 10 }}
         options={reasons.map((r) => ({ label: r.label, value: r.key }))}
       />
       {error && (
-        <div style={{ color: "#cf1322", fontSize: 12, marginTop: 10 }} data-test="exception-error">
+        <div role="alert" style={{ color: "#cf1322", fontSize: 12, marginTop: 10 }} data-test="exception-error">
           {error}
         </div>
       )}

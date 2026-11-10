@@ -63,6 +63,9 @@ body {
 .panel-card { background: #fff; border-radius: 12px; border: 1px solid var(--line); padding: 12px 14px; display: flex; flex-direction: column; overflow: hidden; }
 .panel-scroll { flex: 1; min-height: 0; overflow: auto; padding-right: 2px; }
 .panel-footer { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 8px; }
+.photo-quality-example { margin-top: 8px; }
+.photo-quality-example summary { cursor: pointer; font-weight: 600; }
+.photo-quality-example figure { margin: 8px 0 0; }
 
 .viewer { position: relative; flex: 1; overflow: hidden; cursor: grab; touch-action: none; }
 .viewer:active { cursor: grabbing; }

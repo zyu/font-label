@@ -80,7 +80,7 @@ export default function ReviewPage() {
   // 只提交真正改过的维度，未改的维度保持原值
   const changedScorePatch = useMemo(() => {
     const out: Record<string, number> = {};
-    if (!image) return out;
+    if (image?.kind !== "score") return out;
     for (const d of dims) {
       const cur = mergedScores[d.key];
       if (cur !== undefined && cur !== image.scores?.[d.key]) out[d.key] = cur;
@@ -105,6 +105,7 @@ export default function ReviewPage() {
   const next = idx >= 0 ? list[idx + 1] : undefined;
 
   const latest = detail.data?.reviews?.[0];
+  const isException = image.kind === "exception";
 
   return (
     <div className="annotate-shell">
@@ -131,12 +132,12 @@ export default function ReviewPage() {
         </Card>
 
         <div className="panel-card">
-          <Descriptions
+          {!isException && <Descriptions
             size="small"
             column={2}
             title="标注内容"
             items={[
-              { key: "kind", label: "类型", children: image.kind === "exception" ? <Tag color="orange">异常上报</Tag> : <Tag color="blue">评分</Tag> },
+              { key: "kind", label: "类型", children: <Tag color="blue">评分</Tag> },
               {
                 key: "total",
                 label: "总分",
@@ -156,7 +157,7 @@ export default function ReviewPage() {
                 ),
               })),
             ]}
-          />
+          />}
 
           {image.kind === "score" && (
             <Card
@@ -207,12 +208,12 @@ export default function ReviewPage() {
             </Card>
           )}
 
-          {image.kind === "exception" ? (
+          {isException && (
             <Alert
               type="warning"
               showIcon
               style={{ margin: "12px 0" }}
-              title="这张图被标注为不可评（异常）"
+              title="照片不合格原因"
               description={
                 <Space direction="vertical" size={2}>
                   {(image.exception_reasons ?? []).map((r) => (
@@ -221,10 +222,11 @@ export default function ReviewPage() {
                     </span>
                   ))}
                   {image.comment && <span>备注：{image.comment}</span>}
+                  {image.status === "submitted" && <span>确认后，这张照片会计入无效图。</span>}
                 </Space>
               }
             />
-          ) : null}
+          )}
 
           {latest && (
             <Card size="small" title="上一次审核" style={{ marginBottom: 12 }} styles={{ body: { whiteSpace: "pre-wrap" } }}>
@@ -244,7 +246,7 @@ export default function ReviewPage() {
               type="primary"
               size="large"
               block
-              icon={<CheckOutlined />}
+              icon={<CheckOutlined aria-hidden="true" />}
               loading={review.isPending}
               disabled={image.status !== "submitted"}
               onClick={() =>
@@ -256,7 +258,7 @@ export default function ReviewPage() {
               }
               data-test="approve"
             >
-              通过（{image.kind === "exception" ? "异常成立，记无效图" : "评分合格"}）
+              {isException ? "确认照片不合格" : "通过（评分合格）"}
             </Button>
             <Button
               danger

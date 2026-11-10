@@ -50,7 +50,7 @@ export default function ReviewQueuePage() {
       title: "类型",
       width: 100,
       render: (_: unknown, row: ImageDTO) =>
-        row.kind === "exception" ? <Tag color="orange">异常上报</Tag> : <Tag color="blue">评分</Tag>,
+        row.kind === "exception" ? <Tag color="orange">照片不合格</Tag> : <Tag color="blue">评分</Tag>,
     },
     {
       title: "总分",
@@ -86,7 +86,7 @@ export default function ReviewQueuePage() {
               options={[
                 { label: "全部", value: "" },
                 { label: "评分", value: "score" },
-                { label: "异常", value: "exception" },
+                { label: "照片不合格", value: "exception" },
               ]}
             />
           </Space>
