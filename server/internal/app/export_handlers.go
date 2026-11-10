@@ -105,7 +105,7 @@ func (f exportFilters) where() (string, []any) {
 	case "reviewed":
 		clause += " AND i.status IN ('approved','excluded','rejected')"
 	default:
-		clause += " AND i.status IN ('approved','excluded')"
+		clause += " AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"
 	}
 	if len(f.Folders) > 0 {
 		args = append(args, f.Folders)
@@ -189,7 +189,7 @@ func (s *Server) handleCreateExport(c *gin.Context) {
 	labels := s.exceptionLabels(ctx)
 	rows = eligibleExportRows(in.Format, rows, rubric.Dims, labels)
 	if len(rows) == 0 {
-		httpx.Fail(c, httpx.NotFound("没有符合条件的训练样本（仅包含审核通过的评分和无效图）"))
+		httpx.Fail(c, httpx.NotFound("没有符合条件的训练样本"))
 		return
 	}
 

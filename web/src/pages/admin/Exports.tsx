@@ -144,6 +144,8 @@ export default function ExportsPage() {
           </Form.Item>
         </Form>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          「仅已通过」只导出审核通过的评分。需要包含无效图时，请选择「已审核（含打回）」或「全部」。
+          <br />
           Excel 列：文件夹、服务器文件名、原始文件名、序号、标注员、提交时间、五个维度分数（白平衡/黑平衡/参差/结构/控笔）、总分、等级、点评、状态、审核员、审核时间、驳回次数、异常原因、图片相对路径。
           <br />
           训练集 ZIP：一个压缩包内包含一个 <code>data.jsonl</code> 和 <code>images/</code> 目录。

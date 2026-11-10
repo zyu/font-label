@@ -152,14 +152,40 @@ func TestTrainingZIPScoredSamples(t *testing.T) {
 	}
 }
 
-func TestExportHistoryIncludesSynchronousDownloads(t *testing.T) {
+func TestExportStatusFilter(t *testing.T) {
+	for _, tc := range []struct{ status, want string }{
+		{"approved", " i.id > 0 AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"},
+		{"", " i.id > 0 AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"},
+		{"reviewed", " i.id > 0 AND i.status IN ('approved','excluded','rejected')"},
+		{"all", " i.id > 0"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			got, _ := (exportFilters{Status: tc.status}).where()
+			if got != tc.want {
+				t.Fatalf("filter = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExportHistoryIncludesOnlyApprovedScoresForApprovedDownloads(t *testing.T) {
 	s, router, token := regressionServer(t)
-	fid, _ := regressionImage(t, s, "excluded")
+	excludedFolder, _ := regressionImage(t, s, "excluded")
+	approvedFolder, approvedID := regressionImage(t, s, "approved")
+	legacyFolder, legacyID := regressionImage(t, s, "approved")
+	_, err := s.pool().Exec(context.Background(), `INSERT INTO annotations(image_id, annotator_id, kind, scores, total)
+		VALUES ($1, 1, 'score', '{"white":0,"black":0,"variation":0,"structure":0,"control":0}', 0),
+		       ($2, 1, 'exception', NULL, 0)`, approvedID, legacyID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s.store.Write("test.png", []byte("image")); err != nil {
 		t.Fatal(err)
 	}
 	for _, format := range []string{"csv", "json", "xlsx", "jsonl"} {
-		w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": format, "filters": map[string]any{"folders": []int64{fid}}})
+		w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": format, "filters": map[string]any{
+			"status": "approved", "folders": []int64{approvedFolder, excludedFolder, legacyFolder},
+		}})
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", format, w.Code, w.Body)
 		}
@@ -167,8 +193,12 @@ func TestExportHistoryIncludesSynchronousDownloads(t *testing.T) {
 			if w.Header().Get("Content-Type") != "application/zip" || !strings.Contains(w.Header().Get("Content-Disposition"), ".zip") {
 				t.Fatalf("bad ZIP headers: %v", w.Header())
 			}
-			if _, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len())); err != nil {
+			zr, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+			if err != nil {
 				t.Fatal(err)
+			}
+			if len(zr.File) != 2 {
+				t.Fatalf("ZIP must contain data.jsonl and only the approved image, got %d entries", len(zr.File))
 			}
 		}
 	}
@@ -235,7 +265,7 @@ func TestAsyncDatasetExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": "jsonl", "filters": map[string]any{"folders": []int64{fid}}})
+	w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": "jsonl", "filters": map[string]any{"folders": []int64{fid}, "status": "reviewed"}})
 	var created struct {
 		Data struct {
 			Async    bool
@@ -280,7 +310,7 @@ func TestAsyncDatasetExport(t *testing.T) {
 func TestDatasetExportFailureAndEligibility(t *testing.T) {
 	s, router, token := regressionServer(t)
 	fid, _ := regressionImage(t, s, "excluded")
-	w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": "jsonl", "filters": map[string]any{"folders": []int64{fid}}})
+	w := regressionRequest(t, router, token, "POST", "/exports", map[string]any{"format": "jsonl", "filters": map[string]any{"folders": []int64{fid}, "status": "reviewed"}})
 	if w.Code != 500 {
 		t.Fatalf("missing image should fail: %d %s", w.Code, w.Body)
 	}
