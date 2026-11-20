@@ -153,9 +153,9 @@ export default function ExportsPage() {
                   { label: "训练集 ZIP", value: "jsonl" },
                 ]}
               />
-              <Button type="primary" icon={<DownloadOutlined />} loading={busy} onClick={doExport}>
+              {/* <Button type="primary" icon={<DownloadOutlined />} loading={busy} onClick={doExport}>
                 导出
-              </Button>
+              </Button> */}
             </Space>
           </Form.Item>
         </Form>
