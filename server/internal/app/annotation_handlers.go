@@ -199,6 +199,10 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		}
 		scoresJSON, _ = json.Marshal(in.Scores)
 	} else {
+		if len(in.Scores) > 0 || len(in.DimComments) > 0 || in.TotalOverride != nil {
+			httpx.Fail(c, httpx.Validation(map[string]string{"kind": "异常输入不可包含定级或维度评语"}, "异常输入不可包含定级或维度评语"))
+			return
+		}
 		if len(reasons) == 0 {
 			httpx.Fail(c, httpx.Validation(map[string]string{"exception_reasons": "请至少选择一项异常原因"}, "请至少选择一项异常原因"))
 			return

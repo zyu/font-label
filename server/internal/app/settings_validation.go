@@ -25,7 +25,7 @@ var settingDefinitions = map[string]settingDefinition{
 	"auto_next_after_submit": {kind: "boolean"},
 	"exception_reasons":      {kind: "reasons"},
 	"reject_reason_tags":     {kind: "strings"},
-	"comment_templates":      {kind: "strings"},
+	"comment_templates":      {kind: "templates"},
 }
 
 func validateSetting(key string, body []byte) error {
@@ -47,13 +47,19 @@ func validateSetting(key string, body []byte) error {
 		if json.Unmarshal(body, &value) != nil || value == nil {
 			return fail("必须为布尔值 true 或 false")
 		}
-	case "strings", "reasons":
+	case "strings", "reasons", "templates":
 		var items []json.RawMessage
 		if json.Unmarshal(body, &items) != nil || items == nil {
 			return fail("必须为 JSON 数组")
 		}
 		seen := map[string]bool{}
 		for _, item := range items {
+			if def.kind == "templates" && validCommentTemplate(item) {
+				continue
+			}
+			if def.kind == "templates" {
+				return fail("常用评语须为非空字符串，或含 dimension、grade（S/A/B/C/D）、text 的对象")
+			}
 			if def.kind == "strings" {
 				var value *string
 				if json.Unmarshal(item, &value) != nil || value == nil || strings.TrimSpace(*value) == "" {
@@ -76,4 +82,23 @@ func validateSetting(key string, body []byte) error {
 		}
 	}
 	return nil
+}
+
+func validCommentTemplate(raw json.RawMessage) bool {
+	var legacy string
+	if json.Unmarshal(raw, &legacy) == nil && strings.TrimSpace(legacy) != "" {
+		return true
+	}
+	var item map[string]string
+	if json.Unmarshal(raw, &item) != nil || len(item) != 3 ||
+		strings.TrimSpace(item["dimension"]) == "" || strings.TrimSpace(item["dimension"]) != item["dimension"] ||
+		strings.TrimSpace(item["text"]) == "" {
+		return false
+	}
+	switch item["grade"] {
+	case "S", "A", "B", "C", "D":
+		return true
+	default:
+		return false
+	}
 }

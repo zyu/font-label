@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Button,
   Alert,
   Card,
-  Dropdown,
   Empty,
-  Input,
   Modal,
   Space,
   Spin,
@@ -28,19 +26,22 @@ import { api, ApiError } from "../api/client";
 import type { Draft, ImageDTO, ImageDetail, Page, Review } from "../api/types";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
-import ScorePanel, { computeTotal, snapToStep } from "../components/ScorePanel";
+import DimensionGradeCard from "../components/DimensionGradeCard";
 import ExceptionPanel from "../components/ExceptionPanel";
 import ExampleDrawer from "../components/ExampleDrawer";
-import { dimCommentStates, dimCommentsOk, firstBlockingDimComment } from "../lib/dimComments";
-import { exceptionReasons, stringSetting } from "../lib/settings";
+import { dimCommentStates } from "../lib/dimComments";
+import { LEVELS, levelForScore, scoreForLevel, type Level } from "../lib/annotationLevels";
+import { exceptionReasons } from "../lib/settings";
 import { createSubmitId } from "../lib/submitId";
 import { STATUS_LABEL } from "../api/types";
 
 const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
   ["← / →", "上一张 / 下一张"],
-  ["A / S / D / F / G", "跳到 白平衡 / 黑平衡 / 参差 / 结构 / 控笔 的分数框"],
-  ["E", "标记照片不合格"],
+  ["1 / 2 / 3 / 4 / 5", "为当前维度选择 S / A / B / C / D"],
+  ["Tab", "从等级按钮跳到本维评语框"],
+  ["A / S / D / F / G", "跳到白平衡、黑平衡、参差、结构、控笔"],
+  ["E", "打开异常输入"],
   ["?", "显示快捷键"],
 ];
 
@@ -56,18 +57,18 @@ function AnnotationEditor({ id }: { id: number }) {
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
-  const templates = stringSetting(me?.comment_templates);
   const reasons = exceptionReasons(me?.exception_reasons);
 
   const [scores, setScores] = useState<Record<string, number>>({});
   // 五维各自的点评：{ white: "...", black: "..." }
   const [dimComments, setDimComments] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
-  const [hotkeyDim, setHotkeyDim] = useState(rubric.dims[0]?.key ?? "fill");
+  const [activeDim, setActiveDim] = useState(rubric.dims[0]?.key);
+  const [invalidDim, setInvalidDim] = useState<string>();
+  const cardList = useRef<HTMLDivElement>(null);
   const [excOpen, setExcOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
-  const [shortcutSubmit, setShortcutSubmit] = useState(false);
   const [initialized, setInitialized] = useState<string | null>(null);
   const startedAt = useRef<number>(Date.now());
   const draftTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -110,35 +111,45 @@ function AnnotationEditor({ id }: { id: number }) {
   useEffect(() => {
     if (!image || initialized === `${image.id}:${image.status}`) return;
     const draft = canEdit ? detail.data?.draft : null;
-    setScores(canEdit ? snapToStep(rubric.dims, draft?.scores ?? image.scores ?? {}) : image.scores ?? {});
+    const savedScores = draft?.scores ?? image.scores ?? {};
+    // Keep valid historical scores, normalizing only values outside the current rubric.
+    setScores(canEdit ? Object.fromEntries(rubric.dims.flatMap((dim) => {
+      const value = savedScores[dim.key];
+      const level = levelForScore(dim, value);
+      if (!level) return [];
+      const step = Math.max(1, dim.step || 1);
+      const max = dim.max > 0 ? dim.max : 10;
+      return [[dim.key, value >= 0 && value <= max && value % step === 0 ? value : scoreForLevel(dim, level)]];
+    })) : savedScores);
     setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
     setInitialized(`${image.id}:${image.status}`);
     startedAt.current = Date.now();
   }, [image, detail.data?.draft, initialized, rubric.dims, canEdit]);
 
-  const total = useMemo(() => computeTotal(rubric.dims, scores), [rubric.dims, scores]);
-  // 编辑中预览当前方案；只读详情与列表、审核、导出共用服务端保存的结果。
-  const complete = canEdit ? rubric.dims.every((d) => scores[d.key] !== undefined) : image?.total != null;
-  const totalValue = (canEdit ? total : image?.total) ?? 0;
-  const grade = useMemo(() => {
-    if (!canEdit) return image?.grade ?? "";
-    const bands = [...rubric.grade_bands].sort((a, b) => b.min - a.min);
-    return bands.find((b) => totalValue >= b.min)?.label ?? "";
-  }, [canEdit, image?.grade, rubric.grade_bands, totalValue]);
-
   const dimMin = rubric.dim_comment_min || 10;
   const dimMax = rubric.dim_comment_max || 50;
   const commentStates = dimCommentStates(rubric.dims, dimComments, dimMin, dimMax);
-  const allCommentsOk = dimCommentsOk(rubric.dims, dimComments, dimMin, dimMax);
-  // 提交按钮为什么点不动：把原因说清楚，而不是只把按钮变灰
-  const missingDims = rubric.dims.filter((d) => scores[d.key] === undefined).map((d) => d.label);
-  const blockingComment = firstBlockingDimComment(rubric.dims, dimComments, dimMin, dimMax);
-  const submitBlockedReason = missingDims.length
-    ? `还有 ${missingDims.length} 维没打分：${missingDims.join("、")}`
-    : blockingComment
-      ? `${blockingComment.label}点评${blockingComment.hint}`
-      : "";
+  const firstInvalid = commentStates.find((comment, index) =>
+    !levelForScore(rubric.dims[index], scores[comment.key]) || !comment.ok,
+  );
+
+  function findCard(key: string) {
+    return Array.from(cardList.current?.querySelectorAll<HTMLElement>("[data-dim-comment]") ?? [])
+      .find((card) => card.dataset.dimComment === key);
+  }
+
+  function pickGrade(key: string, level: Level) {
+    const dim = rubric.dims.find((d) => d.key === key);
+    if (!dim || !canEdit || excOpen || submitting.current) return false;
+    const value = scoreForLevel(dim, level);
+    if (levelForScore(dim, value) !== level) return false;
+    setScores((previous) => ({ ...previous, [key]: value }));
+    setActiveDim(key);
+    setInvalidDim((previous) => previous === key ? undefined : previous);
+    setDirty(true);
+    return true;
+  }
 
   const saveDraft = useCallback(
     (payload: Draft) => {
@@ -219,13 +230,17 @@ function AnnotationEditor({ id }: { id: number }) {
   }
 
   function doSubmit() {
-    if (!canEdit) return;
-    if (!complete) {
-      message.warning(`五个维度都要打分才能提交（还差 ${rubric.dims.filter((d) => scores[d.key] === undefined).length} 个）`);
-      return;
-    }
-    if (!allCommentsOk) {
-      message.warning(blockingComment ? `${blockingComment.label}点评${blockingComment.hint}` : `每个维度都要写点评（${dimMin}~${dimMax} 字）`);
+    if (!canEdit || excOpen || submitting.current) return;
+    if (firstInvalid) {
+      const key = firstInvalid.key;
+      const commentEnabled = scores[key] !== undefined;
+      setActiveDim(key);
+      setInvalidDim(key);
+      const card = findCard(key);
+      const target = card?.querySelector<HTMLElement>(commentEnabled ? "textarea" : '[role="radio"][tabindex="0"]');
+      target?.focus({ preventScroll: true });
+      card?.scrollIntoView?.({ block: "nearest" });
+      message.warning(commentEnabled ? `${firstInvalid.label}评语${firstInvalid.hint}` : `请先为${firstInvalid.label}选档`);
       return;
     }
     send({
@@ -235,14 +250,6 @@ function AnnotationEditor({ id }: { id: number }) {
       duration_ms: Date.now() - startedAt.current,
     });
   }
-
-  // InputNumber commits its value on Enter in the same event as the shortcut.
-  // Submit after React has applied that update, so we use the final score.
-  useEffect(() => {
-    if (!shortcutSubmit) return;
-    setShortcutSubmit(false);
-    doSubmit();
-  });
 
   const list = queue.data ?? [];
   const idx = list.findIndex((x) => x.id === id);
@@ -279,34 +286,33 @@ function AnnotationEditor({ id }: { id: number }) {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.defaultPrevented || excOpen || helpOpen || exampleOpen) return;
+      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen) return;
       const el = e.target as HTMLElement;
-      const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName);
+      const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
-        if (canEdit) setShortcutSubmit(true);
+        doSubmit();
         return;
       }
-      if (typing) return;
+      if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === "ArrowLeft") go(prev);
       if (e.key === "ArrowRight") go(next);
       if (e.key === "?") setHelpOpen(true);
-      if (canEdit && !submitting.current && e.key.toLowerCase() === "e") setExcOpen(true);
-      // A/S/D/F/G：按维度顺序跳到分数框，直接键入 0~20
-      const focusDim = (i: number) => {
-        const d = rubric.dims[i];
-        if (!d) return;
-        setHotkeyDim(d.key);
-        const el = document.querySelector<HTMLInputElement>(`[data-dim="${d.key}"] input`);
-        el?.focus();
-        el?.select();
-      };
-      const k = e.key.toLowerCase();
-      if (k === "a") focusDim(0);
-      if (k === "s") focusDim(1);
-      if (k === "d") focusDim(2);
-      if (k === "f") focusDim(3);
-      if (k === "g") focusDim(4);
+      if (!canEdit || submitting.current) return;
+      const key = e.key.toLowerCase();
+      if (key === "e") setExcOpen(true);
+      const level = /^[1-5]$/.test(key) ? LEVELS[Number(key) - 1] : undefined;
+      if (level && activeDim && pickGrade(activeDim, level)) {
+        e.preventDefault();
+        const card = findCard(activeDim);
+        card?.querySelector<HTMLButtonElement>(`[data-level="${level}"]`)?.focus({ preventScroll: true });
+        card?.scrollIntoView?.({ block: "nearest" });
+      }
+      const dim = rubric.dims[["a", "s", "d", "f", "g"].indexOf(key)];
+      if (dim) {
+        e.preventDefault();
+        findCard(dim.key)?.querySelector<HTMLButtonElement>('[role="radio"][tabindex="0"]')?.focus();
+      }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -359,7 +365,14 @@ function AnnotationEditor({ id }: { id: number }) {
 
         <div className="panel-card">
           <div className="panel-scroll">
-          {!canEdit && <Alert type="info" showIcon title={`${STATUS_LABEL[image.status] || image.status} · 只读，不能修改或提交`} style={{ marginBottom: 12 }} />}
+          <Alert className="annotation-status" type="info" showIcon title={
+            <div className="annotation-status-text">
+              <strong>{canEdit
+                ? `${image.status === "rejected" ? "已打回" : "待标注"} · 可编辑`
+                : `${image.quality_pending ? "待质检或仲裁" : STATUS_LABEL[image.status] || image.status} · 只读`}</strong>
+              {canEdit && <span>提交后只读，审核退回后可修改。</span>}
+            </div>
+          } />
           {image.kind === "exception" && (
             <Alert type="warning" showIcon title="照片不合格原因" style={{ marginBottom: 12 }} description={
               <Space direction="vertical" size={4}>
@@ -399,6 +412,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
           {canEdit && (
             <Alert
+              className="annotation-photo-check"
               type="info"
               title="照片质量检查"
               style={{ marginBottom: 12 }}
@@ -418,88 +432,26 @@ function AnnotationEditor({ id }: { id: number }) {
             />
           )}
 
-          <ScorePanel
-            disabled={!canEdit}
-            dims={rubric.dims}
-            value={scores}
-            onPick={(dimKey, n) => {
-              if (!canEdit) return;
-              setScores((prevScores) => ({ ...prevScores, [dimKey]: n }));
-              setDirty(true);
-            }}
-            hotkeyDim={hotkeyDim}
-          />
-
-          <div className="total-box" style={{ marginTop: 14 }}>
-            <span className="total-num">{complete ? totalValue.toFixed(1) : "--"}</span>
-            <span className="total-grade">
-              {complete ? <Tag color={totalValue >= 90 ? "green" : totalValue >= 60 ? "blue" : "volcano"}>{grade}</Tag> : `${rubric.dims.length} 维打分后自动计算`}
-            </span>
-            <span style={{ marginLeft: "auto", fontSize: 12, color: "#7b8598" }}>权重：{rubric.name}</span>
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <b>点评（每个维度各写一条）</b>
-              <Space size={8}>
-                <span style={{ fontSize: 12, color: "#7b8598" }}>{dimMin}~{dimMax} 字/维</span>
-              </Space>
-            </div>
-            <div className="dim-comment-list">
-              {commentStates.map((s) => (
-                <div className="dim-comment-row" key={s.key} data-dim-comment={s.key}>
-                  <div className="dim-comment-label">
-                    <div>{s.label} · {scores[s.key] ?? "—"}/{rubric.dims.find((d) => d.key === s.key)?.max}</div>
-                    <Dropdown
-                      disabled={!canEdit}
-                      menu={{
-                        items: templates.map((text, i) => ({ key: String(i), label: text })),
-                        onClick: ({ key }) => {
-                          if (!canEdit) return;
-                          const text = templates[Number(key)];
-                          if (!text) return;
-                          setDimComments((prev) => {
-                            const current = prev[s.key] ?? "";
-                            return { ...prev, [s.key]: current ? current.replace(/。?$/, "。") + text : text };
-                          });
-                          setDirty(true);
-                        },
-                      }}
-                    >
-                      <Button disabled={!canEdit} size="small" type="link" aria-label={`${s.label}常用评语`}>常用评语 ▾</Button>
-                    </Dropdown>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <Input.TextArea
-                      readOnly={!canEdit}
-                      rows={1}
-                      maxLength={dimMax}
-                      value={dimComments[s.key] ?? ""}
-                      placeholder={`写清这一维的问题，${dimMin}~${dimMax} 字`}
-                      data-test={`dim-comment-${s.key}`}
-                      onChange={(e) => {
-                        if (!canEdit) return;
-                        const v = e.target.value;
-                        setDimComments((prev) => ({ ...prev, [s.key]: v }));
-                        setDirty(true);
-                      }}
-                    />
-                    <div
-                      data-test={`dim-comment-hint-${s.key}`}
-                      style={{ fontSize: 11, marginTop: 2, color: s.ok ? "#7b8598" : "#cf1322" }}
-                    >
-                      {s.hint}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+          <div className="dimension-card-list" ref={cardList} aria-disabled={excOpen || submit.isPending}>
+            {rubric.dims.map((dim, index) => (
+              <DimensionGradeCard key={dim.key} dim={dim} score={scores[dim.key]}
+                comment={commentStates[index]} templates={me?.comment_templates} minLength={dimMin} maxLength={dimMax}
+                editable={canEdit} frozen={excOpen || submit.isPending}
+                active={canEdit && activeDim === dim.key} invalid={invalidDim === dim.key}
+                onActivate={() => setActiveDim(dim.key)} onPick={(level) => { pickGrade(dim.key, level); }}
+                onComment={(value) => {
+                  setDimComments((previous) => ({ ...previous, [dim.key]: value }));
+                  setInvalidDim((previous) => previous === dim.key ? undefined : previous);
+                  setDirty(true);
+                }}
+              />
+            ))}
           </div>
 
           </div>
 
           <div className="panel-footer">
-            <Tooltip title={submitBlockedReason || "提交并自动进入下一张（⌘/Ctrl + Enter）"}>
+            <Tooltip title="提交并进入下一张（⌘/Ctrl + Enter）">
               <span style={{ flex: 1, display: "inline-flex" }}>
                 <Button
                   type="primary"
@@ -507,7 +459,7 @@ function AnnotationEditor({ id }: { id: number }) {
                   style={{ width: "100%" }}
                   icon={<SendOutlined />}
                   loading={submit.isPending}
-                  disabled={!canEdit}
+                  disabled={!canEdit || excOpen}
                   onClick={doSubmit}
                   data-test="submit"
                 >
@@ -515,16 +467,17 @@ function AnnotationEditor({ id }: { id: number }) {
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip title="选择照片不合格的原因并提交审核（E）">
+            <Tooltip title="选择异常类型并提交审核（E）">
               <Button
                 disabled={!canEdit || submit.isPending}
                 danger
                 size="large"
                 icon={<ExclamationCircleOutlined aria-hidden="true" />}
+                aria-label="异常输入"
                 onClick={() => setExcOpen(true)}
                 data-test="exception"
               >
-                照片不合格
+                异常输入
               </Button>
             </Tooltip>
           </div>
@@ -536,11 +489,10 @@ function AnnotationEditor({ id }: { id: number }) {
         reasons={reasons}
         loading={submit.isPending}
         onCancel={() => setExcOpen(false)}
-        onSubmit={(reasons, note) =>
+        onSubmit={(reason) =>
           send({
             kind: "exception",
-            exception_reasons: reasons,
-            exception_note: note,
+            exception_reasons: [reason],
             duration_ms: Date.now() - startedAt.current,
           })
         }

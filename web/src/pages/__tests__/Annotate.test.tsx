@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,17 +9,11 @@ import AnnotatePage from "../Annotate";
 
 const dims = ["white", "black", "variation", "structure", "control"].map((key) => ({ key, label: key, weight: 0.2, max: 20, step: 5 }));
 const comments = Object.fromEntries(dims.map((d) => [d.key, `${d.key}：撇捺左右空白大致匀，重心稳定。`]));
-let showScorePanel = false;
 const scores = Object.fromEntries(dims.map((d) => [d.key, 20]));
-const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }, { min: 80, label: "良好" }, { min: 70, label: "中等" }, { min: 60, label: "及格" }, { min: 0, label: "需加油" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: ["撇捺左右空白大致匀，重心稳定。"], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
+const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }, { min: 80, label: "良好" }, { min: 70, label: "中等" }, { min: 60, label: "及格" }, { min: 0, label: "需加油" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: [{ dimension: "control", grade: "S", text: "起笔收笔清楚，轻重过渡自然。" }, { dimension: "control", grade: "D", text: "起收笔普遍不到位，多处笔画断续。" }, { dimension: "white", grade: "S", text: "字内空白分布均匀，四周留白协调。" }], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
 vi.mock("../../auth", () => ({ useAuth: () => ({ me }) }));
 vi.mock("../../components/ExampleDrawer", () => ({ default: () => null }));
 vi.mock("../../components/ImageViewer", () => ({ default: ({ src }: { src: string }) => <img src={src} alt="标注原图" /> }));
-vi.mock("../../components/ScorePanel", async (original) => {
-  const module = await original<typeof import("../../components/ScorePanel")>();
-  const ActualScorePanel = module.default;
-  return { ...module, default: (props: Parameters<typeof ActualScorePanel>[0]) => showScorePanel ? <ActualScorePanel {...props} /> : null };
-});
 
 function detail(id: number, filled = true): ImageDetail {
   return { image: { id, scores: filled ? scores : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
@@ -39,7 +33,6 @@ function mount(filled = true, imageDetail = detail(1, filled), initialQueue: Ima
 
 beforeEach(() => {
   me.limits.auto_next = false;
-  showScorePanel = false;
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   const getComputedStyle = window.getComputedStyle.bind(window);
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => getComputedStyle(element));
@@ -118,16 +111,15 @@ describe("标注交互回归", () => {
   });
 
   it.each(["submitted", "approved", "excluded"] as const)("%s 图片只读，忽略旧草稿，点击和快捷键均不能提交", async (status) => {
-    showScorePanel = true;
     const saved = detail(1);
     saved.image.status = status;
     saved.draft = { kind: "score", scores: { ...scores, white: 0 }, dim_comments: { ...comments, white: "不应显示的旧草稿" } };
     mount(true, saved);
-    expect(screen.getAllByRole("spinbutton")[0]).toBeDisabled();
+    expect(screen.getAllByRole("radio")[0]).toBeDisabled();
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue(comments.white);
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "照片不合格" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "异常输入" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
     fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
     fireEvent.keyDown(window, { key: "e" });
@@ -158,7 +150,7 @@ describe("标注交互回归", () => {
   it("点击提交会提示未填写原因，与快捷键保持一致", () => {
     mount(false);
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
-    expect(message.warning).toHaveBeenCalledWith(expect.stringContaining("打分"));
+    expect(message.warning).toHaveBeenCalledWith(expect.stringContaining("选档"));
     expect(api.post).not.toHaveBeenCalled();
   });
 
@@ -173,7 +165,7 @@ describe("标注交互回归", () => {
     vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
     vi.mocked(api.post).mockRejectedValue(new ApiError(409, "CONFLICT", "任务已被回收"));
     mount();
-    fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
+    fireEvent.click(screen.getByRole("button", { name: "异常输入" }));
     fireEvent.click(await screen.findByLabelText("图片模糊"));
     fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "exception", exception_reasons: ["blur"] })));
@@ -204,12 +196,15 @@ describe("标注交互回归", () => {
   it("常用评语只填入指定维度，并可直接提交", async () => {
     mount();
     fireEvent.change(document.querySelector('[data-test="dim-comment-control"]')!, { target: { value: "" } });
-    fireEvent.mouseEnter(screen.getByRole("button", { name: "control常用评语" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "撇捺左右空白大致匀，重心稳定。" }));
-    expect(document.querySelector('[data-test="dim-comment-control"]')).toHaveValue("撇捺左右空白大致匀，重心稳定。");
+    fireEvent.click(screen.getByRole("button", { name: "control常用评语" }));
+    const choice = await screen.findByRole("menuitem", { name: "起笔收笔清楚，轻重过渡自然。" });
+    expect(screen.queryByRole("menuitem", { name: "起收笔普遍不到位，多处笔画断续。" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "字内空白分布均匀，四周留白协调。" })).not.toBeInTheDocument();
+    fireEvent.click(choice);
+    expect(document.querySelector('[data-test="dim-comment-control"]')).toHaveValue("起笔收笔清楚，轻重过渡自然。");
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue(comments.white);
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
-    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ dim_comments: { ...comments, control: "撇捺左右空白大致匀，重心稳定。" } })));
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ dim_comments: { ...comments, control: "起笔收笔清楚，轻重过渡自然。" } })));
   });
 
   it("评语过短时点击和快捷键都显示相同原因", () => {
@@ -261,21 +256,19 @@ describe("标注交互回归", () => {
     expect(screen.getByAltText("不合格照片示例")).toHaveAttribute("src", "/examples/invalid.png");
     expect(screen.getByAltText("标注原图")).toBeVisible();
 
-    fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
+    fireEvent.click(screen.getByRole("button", { name: "异常输入" }));
     await screen.findByRole("dialog", { name: "标记照片不合格" });
     fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
-    await waitFor(() => expect(screen.getByText("请至少选择一项照片不合格原因")).toBeVisible());
+    await waitFor(() => expect(screen.getByText("请选择一种异常类型")).toBeVisible());
     expect(api.post).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "图片模糊" }));
-    fireEvent.change(screen.getByPlaceholderText("补充说明（可选）"), { target: { value: "左下角笔画看不清" } });
+    fireEvent.click(screen.getByRole("radio", { name: "图片模糊" }));
     fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
     await screen.findByText("工作台");
     expect(api.post).toHaveBeenCalledTimes(1);
     expect(api.post).toHaveBeenCalledWith("/images/1/submit", {
       kind: "exception",
       exception_reasons: ["blur"],
-      exception_note: "左下角笔画看不清",
       duration_ms: expect.any(Number),
       client_submit_id: expect.any(String),
     });
@@ -289,16 +282,30 @@ describe("标注交互回归", () => {
     expect(api.post).not.toHaveBeenCalled();
   });
 
-  it.each([["17", 15], ["26", 20]])("数字框输入 %s 后直接快捷键提交会带上最终档位 %s", async (typed, expected) => {
-    showScorePanel = true;
-    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+  it("按照当前卡片处理 1–5 和 Ctrl+Enter 快捷键", async () => {
     mount();
-    const input = screen.getAllByRole("spinbutton")[0];
-    fireEvent.focus(input);
-    fireEvent.change(input, { target: { value: "10" } });
-    fireEvent.change(input, { target: { value: typed } });
-    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
-    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ scores: { ...scores, white: expected } })));
+    const group = screen.getByRole("radiogroup", { name: "white定级" });
+    fireEvent.focus(within(group).getByRole("radio", { name: "S" }));
+    fireEvent.keyDown(window, { key: "4" });
+    expect(within(group).getByRole("radio", { name: "C" })).toBeChecked();
+    expect(within(group).getByRole("radio", { name: "C" })).toHaveFocus();
+    fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit",
+      expect.objectContaining({ scores: { ...scores, white: 5 } })));
+  });
+
+  it("先选档再写评语，并定位到第一张未完成的卡", () => {
+    mount(false);
+    const white = document.querySelector('[data-dim-comment="white"]') as HTMLElement;
+    const comment = within(white).getByRole("textbox");
+    expect(comment).toBeDisabled();
+    fireEvent.click(within(white).getByRole("radio", { name: "B" }));
+    expect(within(white).getByText(/2 处明显问题/)).toBeVisible();
+    expect(comment).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    expect(white).toHaveAttribute("data-invalid", "true");
+    expect(comment).toHaveFocus();
+    expect(api.post).not.toHaveBeenCalled();
   });
 
   it("标注使用原图保证放大细节", () => {
@@ -317,7 +324,7 @@ describe("异常配置容错", () => {
       mount();
       expect(await screen.findByText("test1.png")).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /提交并下一张/ })).toBeEnabled();
-      fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
+      fireEvent.click(screen.getByRole("button", { name: "异常输入" }));
       expect(await screen.findByRole("dialog", { name: "标记照片不合格" })).toBeInTheDocument();
     } finally {
       me.comment_templates = originalTemplates;
@@ -327,47 +334,14 @@ describe("异常配置容错", () => {
 });
 
 
-describe("表5总分档位", () => {
-  it.each(["submitted", "approved"] as const)("%s 详情沿用接口保存的总分与档位，不按当前方案重算", async (status) => {
+describe("新版定级与历史数据", () => {
+  it("以维度等级显示历史标注，隐藏总分与总档位", () => {
     const saved = detail(1);
-    // 当前方案计算这些分数为100；历史权重或手填总分可能不同。
-    Object.assign(saved.image, { status, total: 40, grade: "需加油" });
+    Object.assign(saved.image, { status: "approved", total: 65, grade: "历史等级", scores: { ...scores, white: 0, black: 15 } });
     mount(true, saved);
-    expect(await screen.findByText("40.0")).toBeInTheDocument();
-    expect(screen.getByText("需加油", { exact: true })).toBeInTheDocument();
-    expect(screen.queryByText("100.0")).not.toBeInTheDocument();
-    expect(screen.queryByText("优秀", { exact: true })).not.toBeInTheDocument();
-  });
-
-  it("只读详情保留保存时的等级，不随当前等级线变化", async () => {
-    const saved = detail(1);
-    Object.assign(saved.image, { status: "approved", total: 65, grade: "历史等级" });
-    mount(true, saved);
-    expect(await screen.findByText("65.0")).toBeInTheDocument();
-    expect(screen.getByText("历史等级", { exact: true })).toBeInTheDocument();
-    expect(screen.queryByText("及格", { exact: true })).not.toBeInTheDocument();
-  });
-
-  it("没有已保存总分的只读记录不根据维度分数编造总分或等级", () => {
-    const saved = detail(1);
-    Object.assign(saved.image, { status: "approved", total: null, grade: "" });
-    mount(true, saved);
-    expect(document.querySelector(".total-num")).toHaveTextContent("--");
-    expect(screen.queryByText("优秀", { exact: true })).not.toBeInTheDocument();
-  });
-
-  it.each([
-    [[10, 10, 10, 15, 5], 50, "需加油"],
-    [[10, 10, 10, 15, 15], 60, "及格"],
-    [[10, 10, 15, 15, 15], 65, "及格"],
-    [[10, 15, 15, 15, 15], 70, "中等"],
-    [[20, 15, 15, 15, 15], 80, "良好"],
-    [[20, 20, 20, 15, 15], 90, "优秀"],
-  ] as const)("%j 总分 %s 显示 %s", async (values, total, grade) => {
-    const imageDetail = detail(1);
-    imageDetail.image.scores = Object.fromEntries(dims.map((d, i) => [d.key, values[i]]));
-    mount(true, imageDetail);
-    expect(await screen.findByText(total.toFixed(1))).toBeInTheDocument();
-    expect(screen.getByText(grade, { exact: true })).toBeInTheDocument();
+    expect(within(screen.getByRole("radiogroup", { name: "white定级" })).getByRole("radio", { name: "D" })).toBeChecked();
+    expect(within(screen.getByRole("radiogroup", { name: "black定级" })).getByRole("radio", { name: "A" })).toBeChecked();
+    expect(screen.queryByText("65.0")).not.toBeInTheDocument();
+    expect(screen.queryByText("历史等级")).not.toBeInTheDocument();
   });
 });

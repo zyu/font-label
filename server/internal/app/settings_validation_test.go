@@ -20,7 +20,7 @@ func TestPutSettingRejectsInvalidValuesBeforeDatabase(t *testing.T) {
 		"max_upload_files":       {"0", "-1", "1001", "1.5"},
 		"max_file_mb":            {"-1", "1025", "1.5", `"10"`},
 		"auto_next_after_submit": {"0", "1", `"yes"`, `"false"`, "[]"},
-		"comment_templates":      {"[1,2,3]", `[{"x":1}]`, `[null]`, `[" "]`, `["ok",{}]`},
+		"comment_templates":      {"[1,2,3]", `[{"x":1}]`, `[null]`, `[" "]`, `["ok",{}]`, `[{"dimension":"white","grade":"F","text":"评语"}]`},
 		"reject_reason_tags":     {"[1]", `[{}]`, `[null]`, `[""]`},
 		"exception_reasons":      {"[1,2,3]", `[{"x":1}]`, `[null]`, `["blur"]`, `[{"key":"blur"}]`, `[{"Key":"blur","label":"模糊"}]`, `[{"key":1,"label":"模糊"}]`, `[{"key":" blur","label":"模糊"}]`, `[{"key":" ","label":"模糊"}]`, `[{"key":"blur","label":" "}]`, `[{"key":"blur","label":"模糊","extra":1}]`, `[{"key":"blur","label":"模糊"},{"key":"blur","label":"重复"}]`},
 	}
@@ -82,7 +82,7 @@ func TestSettingValidationAcceptsBoundaries(t *testing.T) {
 		"max_upload_files":       {"1", "1000"},
 		"max_file_mb":            {"0", "1024"},
 		"auto_next_after_submit": {"true", "false"},
-		"comment_templates":      {"[]", `["评语"]`},
+		"comment_templates":      {"[]", `["评语"]`, `[{"dimension":"white","grade":"S","text":"白平衡评语"}]`},
 		"reject_reason_tags":     {"[]", `["分数偏高"]`},
 		"exception_reasons":      {"[]", `[{"key":"blur","label":"模糊"}]`},
 	}

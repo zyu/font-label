@@ -52,7 +52,7 @@ export interface MeResponse {
   rubric: Rubric;
   exception_reasons: { key: string; label: string }[];
   reject_reason_tags: string[];
-  comment_templates: string[];
+  comment_templates: (string | { dimension: string; grade: string; text: string })[];
   limits: Limits;
 }
 

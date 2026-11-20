@@ -60,7 +60,7 @@ body {
 /* annotate workbench */
 .annotate-shell { display: flex; flex-direction: column; height: calc(100vh - 92px); gap: 10px; }
 .annotate-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: #fff; border-radius: 10px; padding: 8px 14px; border: 1px solid var(--line); }
-.annotate-body { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 14px; flex: 1; min-height: 0; }
+.annotate-body { display: grid; grid-template-columns: minmax(0, 1fr) clamp(440px, 42vw, 590px); gap: 14px; flex: 1; min-height: 0; }
 .canvas-card { background: #101725; border-radius: 12px; overflow: hidden; position: relative; min-height: 0; display: flex; }
 .panel-card { background: #fff; border-radius: 12px; border: 1px solid var(--line); padding: 12px 14px; display: flex; flex-direction: column; overflow: hidden; }
 .panel-scroll { flex: 1; min-height: 0; overflow: auto; padding-right: 2px; }
@@ -75,14 +75,93 @@ body {
 .viewer-toolbar { position: absolute; right: 12px; bottom: 12px; display: flex; gap: 6px; background: rgba(16,23,37,.72); padding: 6px; border-radius: 8px; backdrop-filter: blur(4px); }
 .viewer-empty { color: #8b95a8; margin: auto; }
 
+/* Annotation grading cards */
+.annotate-shell .annotation-status { margin-bottom: 10px; padding: 8px 10px; }
+.annotation-status-text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px; }
+.annotation-status-text span { font-size: 13px; }
+.annotate-shell .annotation-photo-check { padding: 8px 10px; }
+.dimension-card-list { display: grid; gap: 10px; }
+.dimension-card-list[aria-disabled="true"] { opacity: .58; }
+.dimension-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid #dce4ee;
+  border-radius: 11px;
+  background: #fff;
+  scroll-margin-block: 8px;
+}
+.dimension-card[data-active="true"] { border-color: #91bfff; box-shadow: 0 0 0 2px #e9f2ff; }
+.dimension-card[data-invalid="true"] { border-color: #ff7875; box-shadow: 0 0 0 2px #fff1f0; }
+.dimension-card-header {
+  display: grid;
+  grid-template-columns: minmax(58px, 88px) minmax(176px, 235px) 1fr;
+  grid-template-areas: "name grades required";
+  gap: 8px;
+  align-items: center;
+}
+.dimension-card-header > div:first-child { grid-area: name; min-width: 0; }
+.dimension-card-header h3 { margin: 0; font-size: 18px; line-height: 1.2; }
+.dimension-subtitle { color: #63748a; font-size: 12px; }
+.dimension-required {
+  grid-area: required;
+  justify-self: end;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: #fff3cb;
+  color: #864500;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.dimension-grades {
+  grid-area: grades;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+}
+.dimension-grades button {
+  min-height: 38px;
+  border: 1px solid #c9d4e1;
+  border-radius: 7px;
+  padding: 0;
+  background: white;
+  color: #526581;
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.dimension-grades button:hover:not(:disabled) { border-color: #6ea4ff; }
+.dimension-grades button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.dimension-grades button:disabled { cursor: default; }
+.dimension-grades button[aria-checked="true"] { background: var(--level-color); border-color: var(--level-color); color: white; }
+.dimension-grades button[data-level="S"] { --level-color: #207347; }
+.dimension-grades button[data-level="A"] { --level-color: #327b61; }
+.dimension-grades button[data-level="B"] { --level-color: #366ba7; }
+.dimension-grades button[data-level="C"] { --level-color: #9e5b18; }
+.dimension-grades button[data-level="D"] { --level-color: #a33f38; }
+.dimension-guide {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  padding: 7px 9px;
+  border-inline-start: 3px solid #c4d1e0;
+  border-radius: 0 6px 6px 0;
+  background: #f5f7fa;
+  color: #425571;
+  font-size: 13px;
+}
+.dimension-guide strong { color: #192b45; }
+.dimension-card textarea { resize: vertical; }
+.dimension-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: #63748a; }
+.dimension-card-footer > span[data-valid="true"] { color: #157443; }
+.dimension-card[data-invalid="true"] .dimension-card-footer > span[data-valid="false"], .exception-validation { color: #b42318; }
+.exception-validation { margin-top: 10px; font-size: 13px; }
+
 .score-grid { display: flex; flex-direction: column; gap: 7px; }
 .score-row { display: flex; align-items: center; gap: 10px; }
 
-/* 五维点评：维度名在左、输入框在右，一行一维，省纵向空间 */
-.dim-comment-list { display: flex; flex-direction: column; gap: 8px; }
-.dim-comment-row { display: flex; align-items: flex-start; gap: 8px; }
-.dim-comment-row textarea { resize: none; }
-.dim-comment-label { width: 100px; flex: 0 0 auto; color: #44506a; font-size: 13px; }
 .score-label { width: 108px; font-weight: 600; }
 .score-row .score-slider { flex: 1; margin: 0 10px; }
 .score-row .score-input { width: 58px; }
@@ -95,9 +174,6 @@ body {
 .score-btn:hover { border-color: var(--brand); color: var(--brand); }
 .score-btn.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
 
-.total-box { display: flex; align-items: baseline; gap: 10px; padding: 9px 12px; border-radius: 10px; background: #f5f7ff; }
-.total-num { font-size: 30px; font-weight: 700; line-height: 1; color: var(--brand); }
-.total-grade { font-size: 14px; }
 .score-step-hint { font-size: 11px; color: #98a2b3; margin-top: 2px; }
 
 .reject-card { border: 1px solid #ffccc7; background: #fff2f0; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
@@ -172,23 +248,13 @@ body {
   }
   .annotate-shell .panel-footer .ant-btn { min-height: 44px; padding-inline: 9px; }
   .annotate-shell .panel-footer > .ant-btn { flex: 1; }
-  .annotate-shell .total-box { flex-wrap: wrap; }
-
-  .annotate-shell .score-grid { gap: 10px; }
-  .annotate-shell .score-row { gap: 6px; min-height: 44px; }
-  .annotate-shell .score-label { flex: 0 0 76px; width: auto; }
-  .annotate-shell .score-slider { min-width: 0; margin-inline: 7px; }
-  .annotate-shell .score-input { flex: 0 0 60px; }
-  .annotate-shell .score-max { flex: 0 0 22px; }
-  .annotate-shell .score-input input { height: 40px; font-size: 16px; }
-  .annotate-shell .dim-comment-row { display: block; }
-  .annotate-shell .dim-comment-label { display: flex; align-items: center; justify-content: space-between; width: auto; }
-  .annotate-shell .dim-comment-label .ant-btn { min-height: 40px; }
-  .annotate-shell .dim-comment-row textarea { min-height: 56px; font-size: 16px; }
+  .dimension-card { scroll-margin-block-end: calc(56px + var(--action-inset)); }
+  .dimension-card textarea { min-height: 56px; font-size: 16px; }
+  .dimension-card .dimension-grades button { min-height: 44px; }
+  .dimension-card-footer .ant-btn { min-height: 40px; }
   .annotate-shell input, .annotate-shell textarea { scroll-margin-block-end: calc(56px + var(--action-inset)); }
 
-  .annotation-exception-modal textarea { font-size: 16px; }
-  .annotation-exception-modal .ant-checkbox-wrapper { min-height: 36px; }
+  .annotation-exception-modal .ant-radio-wrapper { min-height: 36px; }
   .annotation-exception-modal .ant-modal-footer .ant-btn { min-height: 44px; }
 }
 
@@ -198,5 +264,10 @@ body {
 }
 
 @media (max-width: 520px) {
+  .dimension-card-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "name required" "grades grades";
+    gap: 6px;
+  }
   .guide-grid { grid-template-columns: minmax(0, 1fr); }
 }

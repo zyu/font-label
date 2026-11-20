@@ -161,6 +161,9 @@ export default function SettingsPage() {
       <Row gutter={14}>
         <Col span={12}>
           <Card size="small" title="常用评语（JSON 数组）" extra={<a onClick={() => saveJsonSetting("comment_templates", templates)}>保存</a>}>
+            <Typography.Paragraph type="secondary">
+              使用 <code>{'{"dimension":"white","grade":"S","text":"笔画间距均匀，字内空白分布协调。"}'}</code> 按维度和等级配置。自定义旧评语需补充维度和等级后才会出现在对应卡片。
+            </Typography.Paragraph>
             <Input.TextArea rows={8} value={templates} onChange={(e) => setTemplates(e.target.value)} />
           </Card>
         </Col>

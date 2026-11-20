@@ -441,3 +441,26 @@ func TestWorkflowConcurrentArchiveAndUpload(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkflowExceptionRejectsScoresAndRequiresKnownType(t *testing.T) {
+	s, router, token := regressionServer(t)
+	_, id := regressionImage(t, s, "assigned")
+	path := fmt.Sprintf("/images/%d/submit", id)
+	for _, fields := range []map[string]any{
+		{"kind": "exception"},
+		{"kind": "exception", "exception_reasons": []string{"unknown"}},
+		{"kind": "exception", "exception_reasons": []string{"blur"}, "scores": map[string]int{"white": 20}},
+		{"kind": "exception", "exception_reasons": []string{"blur"}, "dim_comments": map[string]string{"white": "示例评语"}},
+	} {
+		res := regressionRequest(t, router, token, "POST", path, fields)
+		if res.Code != 422 {
+			t.Fatalf("invalid exception status %d: %s", res.Code, res.Body)
+		}
+	}
+	res := regressionRequest(t, router, token, "POST", path, map[string]any{
+		"kind": "exception", "exception_reasons": []string{"blur"},
+	})
+	if res.Code != 200 {
+		t.Fatalf("valid exception status %d: %s", res.Code, res.Body)
+	}
+}
