@@ -469,7 +469,7 @@ func renderTrainingZIP(w io.Writer, rows []exportRow, dims []score.Dim, labels m
 		return 0, err
 	}
 	for _, row := range rows {
-		if err := appendTrainingImage(archive, row, store); err != nil {
+		if err := appendArchiveImage(archive, store, row.RelPath, trainingImagePath(row), zip.Deflate); err != nil {
 			return 0, err
 		}
 	}
@@ -479,18 +479,18 @@ func renderTrainingZIP(w io.Writer, rows []exportRow, dims []score.Dim, labels m
 	return len(rows), nil
 }
 
-func appendTrainingImage(archive *zip.Writer, row exportRow, store *storage.Store) error {
-	file, err := store.Open(row.RelPath)
+func appendArchiveImage(archive *zip.Writer, store *storage.Store, source, name string, method uint16) error {
+	file, err := store.Open(source)
 	if err != nil {
-		return fmt.Errorf("读取图片 %s: %w", row.StoredName, err)
+		return fmt.Errorf("读取图片 %s: %w", path.Base(name), err)
 	}
 	defer file.Close()
-	entry, err := archive.Create(trainingImagePath(row))
+	entry, err := archive.CreateHeader(&zip.FileHeader{Name: name, Method: method})
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(entry, file); err != nil {
-		return fmt.Errorf("打包图片 %s: %w", row.StoredName, err)
+		return fmt.Errorf("打包图片 %s: %w", path.Base(name), err)
 	}
 	return nil
 }
@@ -623,19 +623,23 @@ func renderCSV(rows []exportRow, dims []score.Dim) ([]byte, error) {
 	return buf.Bytes(), w.Error()
 }
 
+func exportJSONRecord(r exportRow) gin.H {
+	return gin.H{
+		"folder": r.Folder, "stored_name": r.StoredName, "orig_name": r.OrigName,
+		"seq": r.Seq, "annotator": r.Annotator, "submitted_at": r.Submitted,
+		"scores": r.Scores, "dim_comments": r.DimComments,
+		"total": r.Total, "grade": r.Grade, "comment": r.Comment,
+		"status": r.Status, "reviewer": r.Reviewer, "reviewed_at": r.ReviewedAt,
+		"reject_count": r.RejectNum, "exception_reasons": r.Exceptions,
+		"rel_path": r.RelPath, "sample_id": fmt.Sprintf("P%06d", r.SampleNo), "group": r.Group,
+		"quality_pending": r.QualityPending,
+	}
+}
+
 func renderJSON(rows []exportRow) ([]byte, error) {
 	items := make([]gin.H, 0, len(rows))
 	for _, r := range rows {
-		items = append(items, gin.H{
-			"folder": r.Folder, "stored_name": r.StoredName, "orig_name": r.OrigName,
-			"seq": r.Seq, "annotator": r.Annotator, "submitted_at": r.Submitted,
-			"scores": r.Scores, "dim_comments": r.DimComments,
-			"total": r.Total, "grade": r.Grade, "comment": r.Comment,
-			"status": r.Status, "reviewer": r.Reviewer, "reviewed_at": r.ReviewedAt,
-			"reject_count": r.RejectNum, "exception_reasons": r.Exceptions,
-			"rel_path": r.RelPath, "sample_id": fmt.Sprintf("P%06d", r.SampleNo), "group": r.Group,
-			"quality_pending": r.QualityPending,
-		})
+		items = append(items, exportJSONRecord(r))
 	}
 	return json.MarshalIndent(items, "", "  ")
 }
@@ -649,7 +653,8 @@ func (s *Server) handleListExports(c *gin.Context) {
 		args = []any{}
 	}
 	rows, err := s.pool().Query(c.Request.Context(),
-		`SELECT id, format, status, COALESCE(row_count,0), COALESCE(error,''), created_at, finished_at, expires_at
+		`SELECT id, format, status, COALESCE(row_count,0), COALESCE(error,''), created_at, finished_at, expires_at,
+		        destination, COALESCE(object_key,''), COALESCE(object_url,'')
 		   FROM export_jobs WHERE `+clause+` ORDER BY id DESC LIMIT 50`, args...)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -659,28 +664,35 @@ func (s *Server) handleListExports(c *gin.Context) {
 	items := []gin.H{}
 	for rows.Next() {
 		var (
-			id, rowsN  int64
-			format     string
-			status     string
-			errText    string
-			createdAt  time.Time
-			finishedAt *time.Time
-			expiresAt  *time.Time
+			id, rowsN                         int64
+			format                            string
+			status                            string
+			errText                           string
+			destination, objectKey, objectURL string
+			createdAt                         time.Time
+			finishedAt                        *time.Time
+			expiresAt                         *time.Time
 		)
-		if err := rows.Scan(&id, &format, &status, &rowsN, &errText, &createdAt, &finishedAt, &expiresAt); err != nil {
+		if err := rows.Scan(&id, &format, &status, &rowsN, &errText, &createdAt, &finishedAt, &expiresAt, &destination, &objectKey, &objectURL); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
-		items = append(items, gin.H{
+		item := gin.H{
 			"id": id, "format": format, "status": status, "row_count": rowsN,
 			"error": errText, "created_at": createdAt, "finished_at": finishedAt, "expires_at": expiresAt,
-		})
+			"destination": destination,
+		}
+		if destination == "oss" && status == "done" {
+			item["object_key"] = objectKey
+			item["object_url"] = objectURL
+		}
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	httpx.OK(c, gin.H{"items": items})
+	httpx.OK(c, gin.H{"items": items, "oss_enabled": me.Role == "admin" && s.ossExportEnabled()})
 }
 
 func (s *Server) handleDownloadExport(c *gin.Context) {
@@ -691,21 +703,26 @@ func (s *Server) handleDownloadExport(c *gin.Context) {
 	}
 	me := auth.MustCurrent(c)
 	var (
-		ownerID  int64
-		format   string
-		status   string
-		filePath string
-		expires  *time.Time
+		ownerID     int64
+		format      string
+		status      string
+		filePath    string
+		expires     *time.Time
+		destination string
 	)
 	err = s.pool().QueryRow(c.Request.Context(),
-		`SELECT user_id, format, status, COALESCE(file_path,''), expires_at FROM export_jobs WHERE id=$1`, id).
-		Scan(&ownerID, &format, &status, &filePath, &expires)
+		`SELECT user_id, format, status, COALESCE(file_path,''), expires_at, destination FROM export_jobs WHERE id=$1`, id).
+		Scan(&ownerID, &format, &status, &filePath, &expires, &destination)
 	if err != nil {
 		httpx.Fail(c, httpx.NotFound("导出任务不存在"))
 		return
 	}
 	if ownerID != me.ID && me.Role != "admin" {
 		httpx.Fail(c, httpx.Forbidden("不能下载他人的导出文件"))
+		return
+	}
+	if destination == "oss" {
+		httpx.Fail(c, httpx.Conflict("OSS 文件请通过对象地址访问"))
 		return
 	}
 	if status != "done" || filePath == "" {

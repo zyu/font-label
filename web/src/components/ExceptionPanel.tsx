@@ -25,6 +25,7 @@ export default function ExceptionPanel({ open, reasons, initial, onCancel, onSub
 
   return (
     <Modal
+      className="annotation-exception-modal"
       open={open}
       title="标记照片不合格"
       okText="提交照片不合格"

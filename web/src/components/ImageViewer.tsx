@@ -75,12 +75,16 @@ function ImageCanvas({ src, alt }: Props) {
     return () => wrap.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
+  const zoomed = view.scale > fitScale * 1.001;
+  const fullscreenAvailable = !!document.fullscreenEnabled && typeof HTMLElement.prototype.requestFullscreen === "function";
+  const fullscreenLabel = fullscreenAvailable ? "全屏" : "在新标签页打开原图";
+
   return (
     <div
-      className="viewer"
+      className={zoomed ? "viewer viewer--zoomed" : "viewer"}
       ref={wrapRef}
       onPointerDown={(e) => {
-        if (e.button !== 0 || (e.target as HTMLElement).closest(".viewer-toolbar")) return;
+        if (e.button !== 0 || (e.pointerType === "touch" && !zoomed) || (e.target as HTMLElement).closest(".viewer-toolbar")) return;
         e.preventDefault();
         e.currentTarget.setPointerCapture?.(e.pointerId);
         drag.current = { x: e.clientX, y: e.clientY, px: view.x, py: view.y };
@@ -125,7 +129,14 @@ function ImageCanvas({ src, alt }: Props) {
         <Tooltip title="缩小"><Button aria-label="缩小" size="small" icon={<ZoomOutOutlined />} onClick={() => zoomAt((scale) => scale / 1.2)} /></Tooltip>
         <Tooltip title="放大"><Button aria-label="放大" size="small" icon={<ZoomInOutlined />} onClick={() => zoomAt((scale) => scale * 1.2)} /></Tooltip>
         <Tooltip title="适应窗口"><Button aria-label="适应窗口" size="small" icon={<ExpandOutlined />} onClick={fit} /></Tooltip>
-        <Tooltip title="全屏"><Button aria-label="全屏" size="small" icon={<FullscreenOutlined />} onClick={() => wrapRef.current?.requestFullscreen?.()} /></Tooltip>
+        <Tooltip title={fullscreenLabel}>
+          {fullscreenAvailable ? (
+            <Button aria-label={fullscreenLabel} size="small" icon={<FullscreenOutlined />}
+              onClick={() => wrapRef.current?.requestFullscreen().catch(() => undefined)} />
+          ) : (
+            <Button aria-label={fullscreenLabel} size="small" icon={<FullscreenOutlined />} href={src} target="_blank" rel="noopener noreferrer" />
+          )}
+        </Tooltip>
       </div>
     </div>
   );

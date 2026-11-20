@@ -13,11 +13,13 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/config"
 	"github.com/shangyue/font-label/server/internal/platform/db"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
+	"github.com/shangyue/font-label/server/internal/platform/ossstore"
 	"github.com/shangyue/font-label/server/internal/platform/storage"
 )
 
 // Server wires configuration, database, storage and HTTP handlers.
 type Server struct {
+	oss   ossExportUploader
 	cfg   config.Config
 	db    *db.DB
 	store *storage.Store
@@ -25,7 +27,14 @@ type Server struct {
 }
 
 func New(cfg config.Config, database *db.DB, store *storage.Store) *Server {
-	return &Server{cfg: cfg, db: database, store: store, login: newLoginLimiter()}
+	s := &Server{cfg: cfg, db: database, store: store, login: newLoginLimiter()}
+	uploader, err := ossstore.New(cfg.OSS)
+	if err != nil {
+		slog.Warn("OSS exports unavailable", "reason", err)
+	} else if uploader != nil {
+		s.oss = uploader
+	}
+	return s
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -83,6 +92,7 @@ func (s *Server) Router() *gin.Engine {
 	quality.POST("/samples/:id", auth.Require("quality"), s.handleCheckSample)
 	quality.POST("/disputes/:id", auth.Require("quality"), s.handleResolveDispute)
 	admin.POST("/exports", s.handleCreateExport)
+	admin.POST("/exports/oss", s.handleCreateOSSExport)
 
 	// folders (admin + reviewer read; admin writes)
 	authed.GET("/folders", auth.Require("admin", "reviewer"), s.handleListFolders)

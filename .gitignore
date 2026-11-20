@@ -11,6 +11,7 @@ backups/
 
 # 密钥：deploy/.env 只留 .env.example
 #deploy/.env
+/deploy/.env.oss
 
 # 系统垃圾
 .DS_Store

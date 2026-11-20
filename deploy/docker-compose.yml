@@ -34,6 +34,13 @@ services:
       MAX_HOLD_PER_USER: "100"
       LOCK_TTL_HOURS: "24"
       WORKER_IN_API: "true"
+      OSS_BUCKET: ${OSS_BUCKET:-}
+      OSS_REGION: ${OSS_REGION:-cn-chengdu}
+      OSS_ENDPOINT: ${OSS_ENDPOINT:-}
+      OSS_EXPORT_PREFIX: ${OSS_EXPORT_PREFIX:-font-label/exports}
+      OSS_ACCESS_KEY_ID: ${OSS_ACCESS_KEY_ID:-}
+      OSS_ACCESS_KEY_SECRET: ${OSS_ACCESS_KEY_SECRET:-}
+      OSS_SESSION_TOKEN: ${OSS_SESSION_TOKEN:-}
       LOG_LEVEL: info
       TZ: Asia/Shanghai
     volumes:

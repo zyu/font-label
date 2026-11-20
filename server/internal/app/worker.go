@@ -12,6 +12,9 @@ func contextBackground() context.Context { return context.Background() }
 func (s *Server) StartWorker(ctx context.Context) {
 	go s.loop(ctx, 60*time.Second, "requeue", s.requeueExpired)
 	go s.loop(ctx, 5*time.Second, "exports", s.runPendingExports)
+	if s.oss != nil {
+		go s.loop(ctx, 5*time.Second, "oss-exports", s.runPendingOSSExports)
+	}
 }
 
 func (s *Server) loop(ctx context.Context, every time.Duration, name string, fn func(context.Context) error) {
@@ -51,7 +54,7 @@ func (s *Server) requeueExpired(ctx context.Context) error {
 func (s *Server) runPendingExports(ctx context.Context) error {
 	rows, err := s.pool().Query(ctx,
 		`SELECT id, user_id, format, filters::text FROM export_jobs
-		  WHERE status='pending' ORDER BY id LIMIT 3`)
+		  WHERE status='pending' AND destination='download' ORDER BY id LIMIT 3`)
 	if err != nil {
 		return err
 	}

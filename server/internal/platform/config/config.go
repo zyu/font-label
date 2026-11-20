@@ -4,10 +4,13 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/shangyue/font-label/server/internal/platform/ossstore"
 )
 
 // Config holds all runtime configuration, sourced from environment variables.
 type Config struct {
+	OSS           ossstore.Config
 	HTTPAddr      string
 	DatabaseURL   string
 	JWTSecret     string
@@ -43,6 +46,12 @@ func getInt(key string, def int) int {
 // Load reads configuration from the environment with development-friendly defaults.
 func Load() Config {
 	return Config{
+		OSS: ossstore.Config{
+			Bucket:   get("OSS_BUCKET", ""),
+			Region:   get("OSS_REGION", "cn-chengdu"),
+			Endpoint: get("OSS_ENDPOINT", ""),
+			Prefix:   get("OSS_EXPORT_PREFIX", "font-label/exports"),
+		},
 		HTTPAddr:      get("HTTP_ADDR", ":18090"),
 		DatabaseURL:   get("DATABASE_URL", "postgres://postgres:fontlabel@127.0.0.1:15433/fontlabel?sslmode=disable"),
 		JWTSecret:     get("JWT_SECRET", "dev-only-jwt-secret-change-me-0123456789"),

@@ -23,7 +23,7 @@ const FIGS = [
 
 export default function ExampleDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   return (
-    <Drawer open={open} onClose={onClose} size="large" title="五维打分口径与看图示例">
+    <Drawer open={open} onClose={onClose} size="large" styles={{ wrapper: { maxWidth: "100vw" } }} title="五维打分口径与看图示例">
       <Table
         size="small"
         pagination={false}

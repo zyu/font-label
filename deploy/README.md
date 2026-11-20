@@ -54,3 +54,23 @@ git pull
 cd deploy && docker compose up -d --build
 ```
 迁移在启动时自动执行（goose 幂等），回滚用 `goose down` 需人工确认。
+
+## 上传标注结果和图片到阿里云 OSS
+
+在部署机上创建仅部署账号可读的 `deploy/.env.oss`（权限 `600`）。下方是配置示例，凭据填写新签发的 RAM AccessKey。
+
+```dotenv
+OSS_BUCKET=biaozhushuju
+OSS_REGION=cn-chengdu
+OSS_ENDPOINT=https://oss-cn-chengdu.aliyuncs.com
+OSS_EXPORT_PREFIX=font-label/exports
+OSS_ACCESS_KEY_ID=
+OSS_ACCESS_KEY_SECRET=
+# 使用 STS 临时凭据时同时设置 OSS_SESSION_TOKEN。
+```
+
+成都地域的阿里云 ECS 可将 `OSS_ENDPOINT` 改为 `https://oss-cn-chengdu-internal.aliyuncs.com`。RAM 权限按对象前缀授予 `oss:PutObject`。SDK 清理上传失败的分片需要 `oss:AbortMultipartUpload`。
+
+`./deploy/deploy.sh upgrade` 会加载此文件。直接用 Compose 部署时，在 `deploy` 目录运行 `docker compose --env-file .env --env-file .env.oss up -d --build`。
+
+管理员在「导出结果」选好筛选条件后，点击「上传结果和图片到 OSS」。任务在后台打包一个 ZIP，包内的 `annotations.json` 通过 `image_path` 引用 `images/` 中的原图。同一原图的多组标注共享包内的图片条目。上传完成后可从导出记录获取对象键和对象地址。私有桶可通过 OSS 控制台或有权限的客户端访问。服务端打包时需要可容纳 ZIP 的临时磁盘空间，上传后会清理临时文件。

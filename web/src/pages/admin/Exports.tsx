@@ -12,7 +12,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { DownloadOutlined } from "@ant-design/icons";
+import { CloudUploadOutlined, DownloadOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import dayjs from "dayjs";
 import { api, downloadBlob, downloadExportByID } from "../../api/client";
@@ -26,6 +26,9 @@ interface Job {
   error: string;
   created_at: string;
   expires_at: string | null;
+  destination?: "download" | "oss";
+  object_url?: string;
+  object_key?: string;
 }
 
 const fileExtension = (format: string) => format === "jsonl" ? "zip" : format;
@@ -38,6 +41,7 @@ export default function ExportsPage() {
   const [range, setRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
   const [dateField, setDateField] = useState("created");
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const folderList = useQuery({
     queryKey: ["folders"],
@@ -49,24 +53,36 @@ export default function ExportsPage() {
   });
   const jobs = useQuery({
     queryKey: ["export-jobs"],
-    queryFn: () => api.get<{ items: Job[] }>("/exports"),
+    queryFn: () => api.get<{ items: Job[]; oss_enabled: boolean }>("/exports"),
     refetchInterval: (query) => query.state.data?.items.some((job) => job.status === "pending" || job.status === "running") ? 2000 : false,
   });
+
+  const filters = {
+    folders,
+    annotators,
+    status,
+    date_field: dateField,
+    from: range?.[0]?.format("YYYY-MM-DD") ?? "",
+    to: range?.[1]?.format("YYYY-MM-DD") ?? "",
+  };
+
+  async function uploadToOSS() {
+    setUploading(true);
+    try {
+      const { job_id } = await api.post<{ job_id: number }>("/exports/oss", { filters });
+      message.info(`已创建 OSS 上传任务 #${job_id}，可在下方查看状态`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "创建 OSS 上传任务失败");
+    } finally {
+      setUploading(false);
+      await jobs.refetch();
+    }
+  }
 
   async function doExport() {
     setBusy(true);
     try {
-      const res = await api.exportFile({
-        format,
-        filters: {
-          folders,
-          annotators,
-          status,
-          date_field: dateField,
-          from: range?.[0] ? range[0].format("YYYY-MM-DD") : "",
-          to: range?.[1] ? range[1].format("YYYY-MM-DD") : "",
-        },
-      });
+      const res = await api.exportFile({ format, filters });
       if (res.blob) {
         downloadBlob(res.blob, `font-label_${dayjs().format("YYYYMMDD_HHmm")}.${fileExtension(format)}`);
         message.success("已开始下载");
@@ -143,6 +159,18 @@ export default function ExportsPage() {
             </Space>
           </Form.Item>
         </Form>
+        <Space wrap size={10} style={{ marginBottom: 12 }}>
+          <Button icon={<CloudUploadOutlined />} loading={uploading}
+            disabled={!jobs.data?.oss_enabled} onClick={uploadToOSS}>
+            上传结果和图片到 OSS
+          </Button>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {jobs.data?.oss_enabled
+              ? "按当前筛选打包标注 JSON 和原图，后台上传 ZIP。"
+              : jobs.data ? "OSS 上传尚未启用，请检查服务端配置。" : "正在检查 OSS 配置"}
+          </Typography.Text>
+        </Space>
+        <br />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           「仅已通过」只导出审核通过的评分。需要包含无效图时，请选择「已审核（含打回）」或「全部」。
           <br />
@@ -163,13 +191,20 @@ export default function ExportsPage() {
           pagination={false}
           columns={[
             { title: "#", dataIndex: "id", width: 70 },
-            { title: "格式", dataIndex: "format", width: 90, render: (value: string) => value === "jsonl" ? "训练集 ZIP" : value.toUpperCase() },
+            {
+              title: "格式", dataIndex: "format", width: 100,
+              render: (value: string, row: Job) => row.destination === "oss" ? "OSS ZIP" :
+                value === "jsonl" ? "训练集 ZIP" : value.toUpperCase(),
+            },
             {
               title: "状态",
               dataIndex: "status",
               width: 110,
-              render: (v: string) =>
-                v === "done" ? <Tag color="green">已完成</Tag> : v === "failed" ? <Tag color="red">失败</Tag> : <Tag color="processing">{v === "pending" ? "等待中" : "导出中"}</Tag>,
+              render: (value: string, row: Job) => {
+                if (value === "done") return <Tag color="green">{row.destination === "oss" ? "已上传" : "已完成"}</Tag>;
+                if (value === "failed") return <Tag color="red">失败</Tag>;
+                return <Tag color="processing">{value === "pending" ? "等待中" : row.destination === "oss" ? "打包或上传中" : "导出中"}</Tag>;
+              },
             },
             { title: "行数", dataIndex: "row_count", width: 90 },
             { title: "创建时间", dataIndex: "created_at", render: (v: string) => new Date(v).toLocaleString("zh-CN") },
@@ -178,13 +213,18 @@ export default function ExportsPage() {
             {
               title: "操作",
               width: 120,
-              render: (_: unknown, row: Job) =>
-                row.status === "done" ? (
-                  row.expires_at && dayjs(row.expires_at).isBefore(dayjs()) ? "已过期" :
-                  <a onClick={() => downloadExportByID(row.id, `font-label_${row.id}.${fileExtension(row.format)}`).catch((error) => message.error(error instanceof Error ? error.message : "下载失败"))}>下载</a>
-                ) : (
-                  "-"
-                ),
+              render: (_: unknown, row: Job) => {
+                if (row.status !== "done") return "—";
+                if (row.destination === "oss") return (
+                  <Space wrap>
+                    {row.object_url && <a href={row.object_url} target="_blank" rel="noopener noreferrer">对象地址</a>}
+                    {row.object_key && <Typography.Text copyable={{ text: row.object_key, tooltips: ["复制对象键", "已复制"] }} />}
+                  </Space>
+                );
+                if (row.expires_at && dayjs(row.expires_at).isBefore(dayjs())) return "已过期";
+                return <a onClick={() => downloadExportByID(row.id, `font-label_${row.id}.${fileExtension(row.format)}`)
+                  .catch((error) => message.error(error instanceof Error ? error.message : "下载失败"))}>下载</a>;
+              },
             },
           ]}
         />

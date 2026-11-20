@@ -328,17 +328,17 @@ function AnnotationEditor({ id }: { id: number }) {
   return (
     <div className="annotate-shell">
       <div className="annotate-top">
-        <Space size={14} wrap>
+        <Space className="annotate-meta" size={[14, 6]} wrap>
           <Button aria-label="返回列表" icon={<ArrowLeftOutlined />} onClick={() => navigateTo(returnTo)} disabled={submit.isPending}>返回列表</Button>
-          <Tag color="blue">{image.folder}</Tag>
-          <Typography.Text strong>{image.stored_name}</Typography.Text>
+          <Tag className="annotate-folder" color="blue">{image.folder}</Tag>
+          <Typography.Text className="annotate-filename" strong>{image.stored_name}</Typography.Text>
           <Typography.Text type="secondary">
             第 {idx >= 0 ? idx + 1 : 1} / {list.length || 1} 张
           </Typography.Text>
           {image.quality_pending && <Tag color="orange">待质检或仲裁</Tag>}
           {image.status === "rejected" && !image.quality_pending && <Tag color="error">被打回 {image.reject_count} 次</Tag>}
         </Space>
-        <Space>
+        <Space className="annotate-actions">
           <Tooltip title="上一张 (←)">
             <Button aria-label="上一张" icon={<ArrowLeftOutlined />} disabled={!prev || submit.isPending} onClick={() => go(prev)} />
           </Tooltip>
@@ -348,7 +348,7 @@ function AnnotationEditor({ id }: { id: number }) {
           <Button icon={<BookOutlined />} onClick={() => setExampleOpen(true)}>
             查看示例
           </Button>
-          <Button icon={<QuestionCircleOutlined />} onClick={() => setHelpOpen(true)} />
+          <Button aria-label="快捷键" icon={<QuestionCircleOutlined />} onClick={() => setHelpOpen(true)} />
         </Space>
       </div>
 
@@ -388,7 +388,7 @@ function AnnotationEditor({ id }: { id: number }) {
           )}
 
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}>
-            <Tag color="blue">{image.folder}</Tag>
+            <Tag className="annotate-folder" color="blue">{image.folder}</Tag>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               序号 {image.seq} · {STATUS_LABEL[image.status] || image.status}
             </Typography.Text>
@@ -448,7 +448,7 @@ function AnnotationEditor({ id }: { id: number }) {
             <div className="dim-comment-list">
               {commentStates.map((s) => (
                 <div className="dim-comment-row" key={s.key} data-dim-comment={s.key}>
-                  <div style={{ width: 100, fontSize: 13, color: "#44506a", flex: "0 0 auto" }}>
+                  <div className="dim-comment-label">
                     <div>{s.label} · {scores[s.key] ?? "—"}/{rubric.dims.find((d) => d.key === s.key)?.max}</div>
                     <Dropdown
                       disabled={!canEdit}
@@ -498,7 +498,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
           </div>
 
-          <div className="panel-footer" style={{ display: "flex", gap: 8 }}>
+          <div className="panel-footer">
             <Tooltip title={submitBlockedReason || "提交并自动进入下一张（⌘/Ctrl + Enter）"}>
               <span style={{ flex: 1, display: "inline-flex" }}>
                 <Button

@@ -175,8 +175,8 @@ export default function WorkbenchPage() {
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       {mode.error && <Alert type="error" showIcon title={mode.error.message} />}
-      {!grouped && !mode.isLoading && <Row gutter={14}>
-        <Col span={10}>
+      {!grouped && !mode.isLoading && <Row gutter={[14, 14]}>
+        <Col xs={24} sm={10}>
           <Card size="small" title="按张领取" styles={{ body: { paddingTop: 12 } }}>
             <Space>
               <span>领取张数</span>
@@ -204,12 +204,12 @@ export default function WorkbenchPage() {
             </Typography.Paragraph>
           </Card>
         </Col>
-        <Col span={14}>
+        <Col xs={24} sm={14}>
           <Card size="small" title="按文件夹领取" styles={{ body: { paddingTop: 12 } }} loading={folders.isLoading}>
             {folders.data?.items?.length ? (
               <Row gutter={[10, 10]}>
                 {folders.data.items.slice(0, 6).map((f) => (
-                  <Col span={12} key={f.id}>
+                  <Col xs={24} sm={12} key={f.id}>
                     <Card size="small" styles={{ body: { padding: 10 } }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <b>{f.name}</b>
@@ -276,6 +276,7 @@ export default function WorkbenchPage() {
       >
         <Table
           rowKey="id"
+          className="workbench-tasks"
           size="middle"
           loading={tasks.isLoading}
           dataSource={tasks.data?.items ?? []}

@@ -21,6 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="$ROOT/deploy"
 COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
 ENV_FILE="$DEPLOY_DIR/.env"
+OSS_ENV_FILE="$DEPLOY_DIR/.env.oss"
 PROJECT="font-label"
 BACKUP_DIR="${BACKUP_DIR:-$ROOT/backups}"
 BACKUP_KEEP="${BACKUP_KEEP:-0}"
@@ -54,7 +55,13 @@ check_prereq() {
   [[ -f "$COMPOSE_FILE" ]] || die "找不到 $COMPOSE_FILE"
 }
 
-dc() { docker compose --project-name "$PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
+dc() {
+  local env_files=(--env-file "$ENV_FILE")
+  if [[ -f "$OSS_ENV_FILE" ]]; then
+    env_files+=(--env-file "$OSS_ENV_FILE")
+  fi
+  docker compose --project-name "$PROJECT" "${env_files[@]}" -f "$COMPOSE_FILE" "$@"
+}
 
 # ---------- 镜像准备：能复用本地镜像就不拉，拉不动要给能照做的指引 ----------
 image_exists() { docker image inspect "$1" >/dev/null 2>&1; }

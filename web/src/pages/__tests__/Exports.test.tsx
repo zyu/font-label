@@ -23,9 +23,10 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 
-function mount() {
+function mount(ossEnabled = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  for (const key of ["folders", "users", "export-jobs"]) qc.setQueryData([key], { items: [] });
+  for (const key of ["folders", "users"]) qc.setQueryData([key], { items: [] });
+  qc.setQueryData(["export-jobs"], { items: [], oss_enabled: ossEnabled });
   render(<QueryClientProvider client={qc}><ExportsPage /></QueryClientProvider>);
 }
 
@@ -81,4 +82,25 @@ describe("JSON 导出下载交互", () => {
     expect(downloadBlob).not.toHaveBeenCalled();
     await waitFor(() => expect(api.get).toHaveBeenCalledWith("/exports"));
   });
+});
+
+it("按当前筛选创建 OSS 上传任务并显示完成的对象地址", async () => {
+  const objectURL = "https://fixture.oss-cn-chengdu.aliyuncs.com/font-label/exports/fixture.zip";
+  vi.mocked(api.get).mockResolvedValue({
+    oss_enabled: true,
+    items: [{
+      id: 33, format: "json", destination: "oss", status: "done", row_count: 1,
+      created_at: "2026-11-20T09:00:00Z", object_url: objectURL,
+      object_key: "font-label/exports/fixture.zip",
+    }],
+  });
+  const post = vi.spyOn(api, "post").mockResolvedValue({ job_id: 33 });
+  mount(true);
+  fireEvent.click(screen.getByText("已审核（含打回）", { exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: /上传结果和图片到 OSS/ }));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/exports/oss", {
+    filters: { folders: [], annotators: [], status: "reviewed", date_field: "created", from: "", to: "" },
+  }));
+  expect(await screen.findByRole("link", { name: "对象地址" })).toHaveAttribute("href", objectURL);
+  expect(downloadBlob).not.toHaveBeenCalled();
 });

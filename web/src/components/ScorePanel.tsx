@@ -61,7 +61,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim, disabled = 
           <div className="score-row" key={d.key} data-dim={d.key}>
             <div
               className="score-label"
-              style={{ color: hotkeyDim === d.key ? "#2b5cff" : undefined, width: 108 }}
+              style={{ color: hotkeyDim === d.key ? "#2b5cff" : undefined }}
             >
               <Tooltip title={hint || d.label}>
                 <span>
@@ -73,6 +73,7 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim, disabled = 
               </Tooltip>
             </div>
             <Slider
+              className="score-slider"
               disabled={disabled}
               min={0}
               max={max}
@@ -80,10 +81,11 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim, disabled = 
               value={cur ?? 0}
               onChange={(v) => onPick(d.key, v)}
               tooltip={{ formatter: (v) => `${v} 分` }}
-              style={{ flex: 1, margin: "0 10px" }}
             />
             <InputNumber
               disabled={disabled}
+              className="score-input"
+              inputMode="numeric"
               size="small"
               min={0}
               max={max}
@@ -97,9 +99,8 @@ export default function ScorePanel({ dims, value, onPick, hotkeyDim, disabled = 
               onBlur={(e) => commit(e.target.value)}
               onPressEnter={(e) => commit((e.target as HTMLInputElement).value)}
               onStep={(v) => commit(v)}
-              style={{ width: 58 }}
             />
-            <span style={{ width: 30, fontSize: 11, color: "#98a2b3", textAlign: "right" }}>/{max}</span>
+            <span className="score-max">/{max}</span>
           </div>
         );
       })}

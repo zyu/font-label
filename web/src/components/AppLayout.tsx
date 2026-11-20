@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Layout, Menu, Avatar, Dropdown, Space, Tag, Typography } from "antd";
+import { useMemo, useState } from "react";
+import { Layout, Menu, Avatar, Button, Drawer, Dropdown, Space, Tag, Typography } from "antd";
 import {
   EditOutlined,
   AuditOutlined,
@@ -13,6 +13,7 @@ import {
   UserOutlined,
   SafetyCertificateOutlined,
   FileSearchOutlined,
+  MenuOutlined,
 } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
@@ -23,6 +24,7 @@ export default function AppLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
   const loc = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const items = useMemo(() => {
     const role = user?.role;
@@ -53,9 +55,22 @@ export default function AppLayout() {
 
   const selected = items.find((i) => loc.pathname.startsWith(i.key))?.key ?? "";
 
+  const navigation = (
+    <Menu
+      mode="inline"
+      selectedKeys={[selected]}
+      items={items}
+      onClick={({ key }) => {
+        setMenuOpen(false);
+        nav(key);
+      }}
+      style={{ borderInlineEnd: "none" }}
+    />
+  );
+
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Layout.Sider width={216} theme="light" style={{ borderRight: "1px solid #eef0f4" }}>
+      <Layout.Sider className="app-sider" width={216} theme="light" style={{ borderRight: "1px solid #eef0f4" }}>
         <div className="brand">
           <div className="brand-mark">字</div>
           <div>
@@ -63,17 +78,21 @@ export default function AppLayout() {
             <div className="brand-sub">font-label</div>
           </div>
         </div>
-        <Menu
-          mode="inline"
-          selectedKeys={[selected]}
-          items={items}
-          onClick={(e) => nav(e.key)}
-          style={{ borderInlineEnd: "none" }}
-        />
+        {navigation}
       </Layout.Sider>
-      <Layout>
+      <Layout className="app-main">
         <Layout.Header className="app-header">
-          <Typography.Text type="secondary">
+          <div className="app-mobile-nav">
+            <Button
+              type="text"
+              icon={<MenuOutlined />}
+              aria-label="打开导航菜单"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen(true)}
+            />
+            <span className="brand-title">书法评分标注</span>
+          </div>
+          <Typography.Text className="app-header-hint" type="secondary">
             {user?.role === "annotator"
               ? "在工作台完成标注并提交审核"
               : user?.role === "reviewer"
@@ -91,13 +110,17 @@ export default function AppLayout() {
               },
             }}
           >
-            <Space style={{ cursor: "pointer" }}>
+            <Space className="app-account" style={{ cursor: "pointer" }}>
               <Avatar size={30} icon={<UserOutlined />} style={{ background: "#2b5cff" }} />
-              <span>{user?.display_name}</span>
-              <Tag color="blue">{ROLE_LABEL[user?.role || ""]}</Tag>
+              <span className="app-account-name">{user?.display_name}</span>
+              <Tag className="app-account-role" color="blue">{ROLE_LABEL[user?.role || ""]}</Tag>
             </Space>
           </Dropdown>
         </Layout.Header>
+        <Drawer title="导航菜单" placement="left" size="min(280px, 90vw)" open={menuOpen}
+          onClose={() => setMenuOpen(false)} styles={{ body: { padding: 0 } }}>
+          {navigation}
+        </Drawer>
         <Layout.Content className="app-content">
           <Outlet />
         </Layout.Content>
