@@ -136,22 +136,13 @@ func (s *Server) settingBool(ctx context.Context, key string, def bool) bool {
 // ---------- rubric ----------
 
 func (s *Server) activeRubric(ctx context.Context) (score.Rubric, error) {
-	var (
-		id                int64
-		name, dims, bands string
-		cmin, cmax        int
-		dmin, dmax        int
-		allow             bool
-	)
-	err := s.pool().QueryRow(ctx,
-		`SELECT id, name, dims::text, grade_bands::text, comment_min, comment_max,
-		        dim_comment_min, dim_comment_max, allow_total_override
-		   FROM rubrics WHERE is_active LIMIT 1`).
-		Scan(&id, &name, &dims, &bands, &cmin, &cmax, &dmin, &dmax, &allow)
-	if err != nil {
-		return score.Rubric{}, fmt.Errorf("没有启用的评分方案: %w", err)
+	r := score.Rubric{Levels: score.Levels}
+	var dims []byte
+	if err := s.pool().QueryRow(ctx, `SELECT id,name,dims,dim_comment_min,dim_comment_max FROM rubrics WHERE is_active LIMIT 1`).
+		Scan(&r.ID, &r.Name, &dims, &r.DimCommentMin, &r.DimCommentMax); err != nil {
+		return r, fmt.Errorf("没有启用的评级方案: %w", err)
 	}
-	return score.FromJSON(id, name, []byte(dims), []byte(bands), cmin, cmax, dmin, dmax, allow)
+	return r, json.Unmarshal(dims, &r.Dims)
 }
 
 // ---------- image row / dto ----------
@@ -176,15 +167,16 @@ type imageRow struct {
 	RejectCount    int
 	ReviewCount    int
 	Kind           string
-	Total          float64
-	Grade          string
 	Comment        string
-	Scores         string
+	Grades         string
 	DimComments    string
 	Exceptions     []string
 	DurationMS     int
 	ClaimedAt      time.Time
 	SubmittedAt    time.Time
+
+	ExceptionLockID   int64
+	AnnotationVersion int
 }
 
 const imageSelect = `
@@ -194,14 +186,16 @@ SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.st
        i.reject_count, i.review_count,
        COALESCE(i.claimed_at, to_timestamp(0)),
        COALESCE(i.submitted_at, to_timestamp(0)),
-       COALESCE(a.kind,''), COALESCE(a.total,-1), COALESCE(a.grade,''),
-       COALESCE(a.comment,''), COALESCE(a.scores::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
+       COALESCE(a.kind,''),
+       COALESCE(a.comment,''), COALESCE(a.grades::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
        COALESCE(a.exception_reasons,'{}'), COALESCE(a.duration_ms,0),
-       COALESCE(i.group_id,0), COALESCE(g.name,''), i.sample_no, i.quality_pending
+       COALESCE(i.group_id,0), COALESCE(g.name,''), i.sample_no, i.quality_pending,
+       COALESCE(i.exception_lock_id,0), COALESCE(a.version,0)
   FROM images i
   JOIN folders f ON f.id = i.folder_id
   LEFT JOIN users u ON u.id = i.annotator_id
-  LEFT JOIN annotations a ON a.image_id = i.id
+  LEFT JOIN annotations a ON a.image_id=COALESCE(i.exception_lock_id,i.id)
+       AND (i.exception_lock_id IS NOT NULL OR a.version>i.voided_through_version)
   LEFT JOIN annotation_groups g ON g.id=i.group_id`
 
 const imageSelectByID = imageSelect + ` WHERE i.id = $1`
@@ -210,8 +204,9 @@ func scanImage(row pgx.Row) (imageRow, error) {
 	var r imageRow
 	err := row.Scan(&r.ID, &r.FolderID, &r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Day, &r.Status,
 		&r.Width, &r.Height, &r.AnnotatorID, &r.Annotator, &r.RejectCount, &r.ReviewCount,
-		&r.ClaimedAt, &r.SubmittedAt, &r.Kind, &r.Total, &r.Grade, &r.Comment, &r.Scores,
-		&r.DimComments, &r.Exceptions, &r.DurationMS, &r.GroupID, &r.Group, &r.SampleNo, &r.QualityPending)
+		&r.ClaimedAt, &r.SubmittedAt, &r.Kind, &r.Comment, &r.Grades,
+		&r.DimComments, &r.Exceptions, &r.DurationMS, &r.GroupID, &r.Group, &r.SampleNo, &r.QualityPending,
+		&r.ExceptionLockID, &r.AnnotationVersion)
 	return r, err
 }
 
@@ -236,7 +231,6 @@ func (s *Server) toDTO(r imageRow) ImageDTO {
 		RejectCount: r.RejectCount,
 		ReviewCount: r.ReviewCount,
 		Kind:        r.Kind,
-		Grade:       r.Grade,
 		Comment:     r.Comment,
 		Exceptions:  r.Exceptions,
 		ThumbURL:    s.signURL(r.ID, "thumb"),
@@ -250,11 +244,7 @@ func (s *Server) toDTO(r imageRow) ImageDTO {
 		id := r.AnnotatorID
 		d.AnnotatorID = &id
 	}
-	if r.Total >= 0 {
-		t := r.Total
-		d.Total = &t
-	}
-	if r.DurationMS > 0 {
+	if r.ExceptionLockID == 0 && r.DurationMS > 0 {
 		ms := r.DurationMS
 		d.DurationMS = &ms
 	}
@@ -266,9 +256,9 @@ func (s *Server) toDTO(r imageRow) ImageDTO {
 		t := r.SubmittedAt
 		d.SubmittedAt = &t
 	}
-	d.Scores = map[string]int{}
-	if r.Scores != "" && r.Scores != "{}" {
-		_ = json.Unmarshal([]byte(r.Scores), &d.Scores)
+	d.Grades = map[string]string{}
+	if r.Grades != "" && r.Grades != "{}" {
+		_ = json.Unmarshal([]byte(r.Grades), &d.Grades)
 	}
 	d.DimComments = map[string]string{}
 	if r.DimComments != "" && r.DimComments != "{}" && r.DimComments != "null" {

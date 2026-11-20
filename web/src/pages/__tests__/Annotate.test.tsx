@@ -9,14 +9,14 @@ import AnnotatePage from "../Annotate";
 
 const dims = ["white", "black", "variation", "structure", "control"].map((key) => ({ key, label: key, weight: 0.2, max: 20, step: 5 }));
 const comments = Object.fromEntries(dims.map((d) => [d.key, `${d.key}：撇捺左右空白大致匀，重心稳定。`]));
-const scores = Object.fromEntries(dims.map((d) => [d.key, 20]));
-const me = { rubric: { dims, grade_bands: [{ min: 90, label: "优秀" }, { min: 80, label: "良好" }, { min: 70, label: "中等" }, { min: 60, label: "及格" }, { min: 0, label: "需加油" }], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: [{ dimension: "control", grade: "S", text: "起笔收笔清楚，轻重过渡自然。" }, { dimension: "control", grade: "D", text: "起收笔普遍不到位，多处笔画断续。" }, { dimension: "white", grade: "S", text: "字内空白分布均匀，四周留白协调。" }], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as MeResponse;
+const grades = Object.fromEntries(dims.map((d) => [d.key, "S" as const]));
+const me = { rubric: { dims, levels: ["S","A","B","C","D"], dim_comment_min: 10, dim_comment_max: 50 }, limits: { auto_next: false }, comment_templates: [{ dimension: "control", grade: "S", text: "起笔收笔清楚，轻重过渡自然。" }, { dimension: "control", grade: "D", text: "起收笔普遍不到位，多处笔画断续。" }, { dimension: "white", grade: "S", text: "字内空白分布均匀，四周留白协调。" }], exception_reasons: [{ key: "blur", label: "图片模糊" }] } as unknown as MeResponse;
 vi.mock("../../auth", () => ({ useAuth: () => ({ me }) }));
 vi.mock("../../components/ExampleDrawer", () => ({ default: () => null }));
 vi.mock("../../components/ImageViewer", () => ({ default: ({ src }: { src: string }) => <img src={src} alt="标注原图" /> }));
 
 function detail(id: number, filled = true): ImageDetail {
-  return { image: { id, scores: filled ? scores : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
+  return { image: { id, grades: filled ? grades : {}, dim_comments: filled ? comments : {}, stored_name: `test${id}.png`, original_url: `/original/${id}`, preview_url: `/preview/${id}`, status: "assigned" }, draft: null, reviews: [] } as unknown as ImageDetail;
 }
 
 function mount(filled = true, imageDetail = detail(1, filled), initialQueue: ImageDTO[] = [detail(1).image, detail(2).image]) {
@@ -113,7 +113,7 @@ describe("标注交互回归", () => {
   it.each(["submitted", "approved", "excluded"] as const)("%s 图片只读，忽略旧草稿，点击和快捷键均不能提交", async (status) => {
     const saved = detail(1);
     saved.image.status = status;
-    saved.draft = { kind: "score", scores: { ...scores, white: 0 }, dim_comments: { ...comments, white: "不应显示的旧草稿" } };
+    saved.draft = { kind: "score", grades: { ...grades, white: "D" }, dim_comments: { ...comments, white: "不应显示的旧草稿" } };
     mount(true, saved);
     expect(screen.getAllByRole("radio")[0]).toBeDisabled();
     expect(document.querySelector('[data-test="dim-comment-white"]')).toHaveValue(comments.white);
@@ -158,7 +158,7 @@ describe("标注交互回归", () => {
     vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
     mount();
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
-    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "score", dim_comments: comments, client_submit_id: expect.stringMatching(/^[\da-f-]{36}$/) })));
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ kind: "score", grades, dim_comments: comments, client_submit_id: expect.stringMatching(/^[\da-f-]{36}$/) })));
   });
 
   it("异常上报在没有 randomUUID 时能发出请求，并展示接口错误", async () => {
@@ -249,7 +249,7 @@ describe("标注交互回归", () => {
   it("可对照不合格示例，并在未打分时选择原因提交", async () => {
     mount(false);
     expect(screen.getByText("照片质量检查")).toBeInTheDocument();
-    expect(screen.getByText(/倾斜超过 15°/)).toBeInTheDocument();
+    expect(screen.getByText(/图片模糊到看不清笔画/)).toBeInTheDocument();
     const exampleToggle = screen.getByText("查看不合格照片示例");
     fireEvent.click(exampleToggle);
     expect(exampleToggle.closest("details")).toHaveAttribute("open");
@@ -291,7 +291,7 @@ describe("标注交互回归", () => {
     expect(within(group).getByRole("radio", { name: "C" })).toHaveFocus();
     fireEvent.keyDown(window, { key: "Enter", ctrlKey: true });
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/submit",
-      expect.objectContaining({ scores: { ...scores, white: 5 } })));
+      expect.objectContaining({ grades: { ...grades, white: "C" } })));
   });
 
   it("先选档再写评语，并定位到第一张未完成的卡", () => {
@@ -337,11 +337,52 @@ describe("异常配置容错", () => {
 describe("新版定级与历史数据", () => {
   it("以维度等级显示历史标注，隐藏总分与总档位", () => {
     const saved = detail(1);
-    Object.assign(saved.image, { status: "approved", total: 65, grade: "历史等级", scores: { ...scores, white: 0, black: 15 } });
+    Object.assign(saved.image, { status: "approved", total: 65, grade: "历史等级", grades: { ...grades, white: "D", black: "A" } });
     mount(true, saved);
     expect(within(screen.getByRole("radiogroup", { name: "white定级" })).getByRole("radio", { name: "D" })).toBeChecked();
     expect(within(screen.getByRole("radiogroup", { name: "black定级" })).getByRole("radio", { name: "A" })).toBeChecked();
     expect(screen.queryByText("65.0")).not.toBeInTheDocument();
     expect(screen.queryByText("历史等级")).not.toBeInTheDocument();
+  });
+});
+
+describe("组间校验", () => {
+  it("并排显示相差两档的等级和评语，关闭弹窗后可以修改并重交", async () => {
+    vi.mocked(api.post).mockRejectedValueOnce(new ApiError(409, "GRADE_MISMATCH", "组间等级差异", undefined, {
+      differences: [{
+        dimension: "white", label: "白平衡（匀）", own_grade: "S", peer_grade: "B", gap: 2,
+        own_comment: "我的白平衡评语", peer_comment: "对方的白平衡评语",
+      }],
+    }));
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    const dialog = await screen.findByRole("dialog", { name: "组间等级差异" });
+    for (const content of ["白平衡（匀）", "相差 2 档", "我的白平衡评语", "对方的白平衡评语"]) {
+      await waitFor(() => expect(within(dialog).getByText(content)).toBeVisible());
+    }
+    fireEvent.click(within(dialog).getByRole("button", { name: "返回修改" }));
+    const white = screen.getByRole("radiogroup", { name: /white/ });
+    fireEvent.click(within(white).getByRole("radio", { name: /^A/ }));
+    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
+    await screen.findByText("工作台");
+    expect(api.post).toHaveBeenLastCalledWith("/images/1/submit", expect.objectContaining({
+      grades: expect.objectContaining({ white: "A" }),
+    }));
+  });
+
+  it("锁定时只展示对组异常和审核结果，恢复后显示编辑器", async () => {
+    const locked = detail(1);
+    locked.image = { ...locked.image, group_id: 1, status: "exception_locked", kind: "exception", exception_reasons: ["blur"], comment: "对方的异常备注" } as ImageDTO;
+    locked.reviews = [{
+      id: 1, action: "approve", reviewer: "对组审核员", comment: "确认照片模糊",
+      reason_tags: [], created_at: "2026-11-20T12:00:00Z", annotation_version: 1,
+    }];
+    const qc = mount(true, locked);
+    expect(await screen.findByText("确认照片模糊")).toBeVisible();
+    expect(screen.getByText(/对方的异常备注/)).toBeVisible();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    act(() => qc.setQueryData(["image", 1], detail(1, false)));
+    expect(await screen.findByRole("radiogroup", { name: /white/ })).toBeVisible();
+    expect(screen.queryByText(/对方的异常备注/)).not.toBeInTheDocument();
   });
 });

@@ -31,7 +31,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 function mount(url: string, status = "excluded") {
-  const image = { id: 1, folder_id: 9, folder: "测试文件夹", stored_name: "test.png", kind: "exception", status, total: null, exception_reasons: ["blur", "crop"], comment: "需要重拍", scores: {}, dim_comments: {} } as ImageDTO;
+  const image = { id: 1, folder_id: 9, folder: "测试文件夹", stored_name: "test.png", kind: "exception", status, exception_reasons: ["blur", "crop"], comment: "需要重拍", grades: {}, dim_comments: {} } as ImageDTO;
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   qc.setQueryData(["claim-folders"], { items: [] });
   qc.setQueryData(["folders"], { items: [{ id: 9, name: "测试文件夹", submitted: 1 }] });

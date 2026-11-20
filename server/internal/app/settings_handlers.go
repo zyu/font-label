@@ -22,7 +22,7 @@ func (s *Server) handleActiveRubric(c *gin.Context) {
 
 func (s *Server) handleListRubrics(c *gin.Context) {
 	rows, err := s.pool().Query(c.Request.Context(),
-		`SELECT id, name, is_active, created_at, dims::text, grade_bands::text
+		`SELECT id, name, is_active, created_at, dims::text
 		   FROM rubrics ORDER BY id DESC`)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -37,18 +37,16 @@ func (s *Server) handleListRubrics(c *gin.Context) {
 			active    bool
 			createdAt any
 			dims      string
-			bands     string
 		)
-		if err := rows.Scan(&id, &name, &active, &createdAt, &dims, &bands); err != nil {
+		if err := rows.Scan(&id, &name, &active, &createdAt, &dims); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
-		var dv, bv any
+		var dv any
 		_ = json.Unmarshal([]byte(dims), &dv)
-		_ = json.Unmarshal([]byte(bands), &bv)
 		items = append(items, gin.H{
 			"id": id, "name": name, "is_active": active, "created_at": createdAt,
-			"dims": dv, "grade_bands": bv,
+			"dims": dv, "levels": score.Levels,
 		})
 	}
 	httpx.OK(c, gin.H{"items": items})
@@ -56,44 +54,34 @@ func (s *Server) handleListRubrics(c *gin.Context) {
 
 func (s *Server) handleCreateRubric(c *gin.Context) {
 	var in struct {
-		Name          string       `json:"name"`
-		Dims          []score.Dim  `json:"dims"`
-		Bands         []score.Band `json:"grade_bands"`
-		CommentMin    int          `json:"comment_min"`
-		CommentMax    int          `json:"comment_max"`
-		DimCommentMin int          `json:"dim_comment_min"`
-		DimCommentMax int          `json:"dim_comment_max"`
-		AllowOverride bool         `json:"allow_total_override"`
+		Name string `json:"name"`
+		Dims []struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		} `json:"dims"`
+		DimCommentMin int `json:"dim_comment_min"`
+		DimCommentMax int `json:"dim_comment_max"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		httpx.Fail(c, httpx.BadRequest("请求体格式错误"))
 		return
 	}
-	fields := map[string]string{}
-	if strings.TrimSpace(in.Name) == "" {
-		fields["name"] = "请填写方案名称"
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" {
+		httpx.Fail(c, httpx.Validation(map[string]string{"name": "请填写方案名称"}, "评级方案校验失败"))
+		return
 	}
-	if len(in.Dims) == 0 {
-		fields["dims"] = "至少一个维度"
-	}
-	var weightSum float64
-	for _, d := range in.Dims {
-		if d.Key == "" || d.Label == "" {
-			fields["dims"] = "维度缺少 key 或名称"
+	keys := map[string]bool{"white": true, "black": true, "variation": true, "structure": true, "control": true}
+	for _, dim := range in.Dims {
+		if !keys[dim.Key] || strings.TrimSpace(dim.Label) == "" {
+			httpx.Fail(c, httpx.Validation(map[string]string{"dims": "五个固定维度必须各提供一次，并填写名称"}, "评级方案校验失败"))
+			return
 		}
-		weightSum += d.Weight
+		delete(keys, dim.Key)
 	}
-	if weightSum <= 0 {
-		fields["dims"] = "权重之和必须大于 0"
-	}
-	if len(in.Bands) == 0 {
-		fields["grade_bands"] = "至少一个等级区间"
-	}
-	if in.CommentMin <= 0 {
-		in.CommentMin = 20
-	}
-	if in.CommentMax <= in.CommentMin {
-		in.CommentMax = in.CommentMin + 30
+	if len(keys) != 0 {
+		httpx.Fail(c, httpx.Validation(map[string]string{"dims": "请提供全部五个维度"}, "评级方案校验失败"))
+		return
 	}
 	if in.DimCommentMin <= 0 {
 		in.DimCommentMin = 10
@@ -102,19 +90,14 @@ func (s *Server) handleCreateRubric(c *gin.Context) {
 		in.DimCommentMax = 50
 	}
 	if in.DimCommentMax < in.DimCommentMin {
-		fields["dim_comment_max"] = "每维点评上限不能小于下限"
-	}
-	if len(fields) > 0 {
-		httpx.Fail(c, httpx.Validation(fields, "评分方案校验失败"))
+		httpx.Fail(c, httpx.Validation(map[string]string{"dim_comment_max": "每维评语上限不能小于下限"}, "评级方案校验失败"))
 		return
 	}
-	dimsJSON, _ := json.Marshal(in.Dims)
-	bandsJSON, _ := json.Marshal(in.Bands)
+	dims, _ := json.Marshal(in.Dims)
 	var id int64
 	err := s.pool().QueryRow(c.Request.Context(),
-		`INSERT INTO rubrics (name, dims, grade_bands, comment_min, comment_max, allow_total_override, dim_comment_min, dim_comment_max, is_active)
-		 VALUES ($1,$2::jsonb,$3::jsonb,$4,$5,$6,$7,$8,false) RETURNING id`,
-		in.Name, dimsJSON, bandsJSON, in.CommentMin, in.CommentMax, in.AllowOverride, in.DimCommentMin, in.DimCommentMax).Scan(&id)
+		`INSERT INTO rubrics (name,dims,dim_comment_min,dim_comment_max,is_active)
+		 VALUES ($1,$2::jsonb,$3,$4,false) RETURNING id`, in.Name, dims, in.DimCommentMin, in.DimCommentMax).Scan(&id)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -135,7 +118,8 @@ func (s *Server) handleActivateRubric(c *gin.Context) {
 			return err
 		}
 		tag, err := tx.Exec(c.Request.Context(),
-			`UPDATE rubrics SET is_active=true WHERE id=$1`, id)
+			`UPDATE rubrics SET is_active=true WHERE id=$1 AND jsonb_array_length(dims)=5
+			AND dims @> '[{"key":"white"},{"key":"black"},{"key":"variation"},{"key":"structure"},{"key":"control"}]' `, id)
 		if err != nil {
 			return err
 		}
@@ -201,7 +185,7 @@ func (s *Server) handlePutSetting(c *gin.Context) {
 
 func (s *Server) handleAuditLogs(c *gin.Context) {
 	ctx := c.Request.Context()
-	page, size := httpx.Paging(c)
+	page, size := listPaging(c)
 	before := httpx.QueryInt64(c, "before")
 	if before <= 0 {
 		if err := s.pool().QueryRow(ctx, `SELECT COALESCE(max(id),0) FROM audit_logs`).Scan(&before); err != nil {

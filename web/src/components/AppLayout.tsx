@@ -47,7 +47,7 @@ export default function AppLayout() {
         { key: "/admin/groups", icon: <TeamOutlined />, label: "分组与任务下发" },
         { key: "/admin/audit", icon: <FileSearchOutlined />, label: "操作日志" },
         { key: "/admin/exports", icon: <DownloadOutlined />, label: "导出结果" },
-        { key: "/admin/settings", icon: <SettingOutlined />, label: "评分与设置" },
+        { key: "/admin/settings", icon: <SettingOutlined />, label: "评级与设置" },
       );
     }
     return list;
@@ -69,12 +69,12 @@ export default function AppLayout() {
   );
 
   return (
-    <Layout style={{ minHeight: "100vh" }}>
+    <Layout className="app-shell">
       <Layout.Sider className="app-sider" width={216} theme="light" style={{ borderRight: "1px solid #eef0f4" }}>
         <div className="brand">
           <div className="brand-mark">字</div>
           <div>
-            <div className="brand-title">书法评分标注</div>
+            <div className="brand-title">书法评级标注</div>
             <div className="brand-sub">font-label</div>
           </div>
         </div>
@@ -90,7 +90,7 @@ export default function AppLayout() {
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen(true)}
             />
-            <span className="brand-title">书法评分标注</span>
+            <span className="brand-title">书法评级标注</span>
           </div>
           <Typography.Text className="app-header-hint" type="secondary">
             {user?.role === "annotator"

@@ -60,7 +60,7 @@ func TestGroupDispatchAndQualityWorkflow(t *testing.T) {
 	request(otherReviewer, http.MethodGet, imagePath, nil, 403)
 	request(admin, http.MethodPut, "/quality-policy", map[string]any{"sample_rate_bps": 10000}, 200)
 	request(annotator, http.MethodPost, imagePath+"/submit", map[string]any{
-		"kind": "exception", "exception_reasons": []string{"blur"}, "exception_note": "图片模糊",
+		"kind": "exception", "exception_reasons": []string{"blurry"}, "exception_note": "图片模糊",
 	}, 200)
 	request(otherReviewer, http.MethodPost, imagePath+"/review", map[string]any{"action": "approve"}, 403)
 	request(reviewer, http.MethodPost, imagePath+"/review", map[string]any{"action": "approve"}, 200)
@@ -82,12 +82,12 @@ func TestGroupDispatchAndQualityWorkflow(t *testing.T) {
 	if err := s.pool().QueryRow(ctx, `SELECT id, arbiter_id FROM quality_disputes WHERE sample_id=$1`, sample).Scan(&dispute, &arbiter); err != nil {
 		t.Fatal(err)
 	}
-	if arbiter != q1 || arbiter == q2 {
+	if arbiter != q2 {
 		t.Fatalf("first dispute arbiter: %d", arbiter)
 	}
 	disputePath := fmt.Sprintf("/quality/disputes/%d", dispute)
-	request(otherQuality, http.MethodPost, disputePath, map[string]any{"result": "return"}, 403)
-	request(quality, http.MethodPost, disputePath, map[string]any{"result": "return", "note": "请重做"}, 200)
+	request(quality, http.MethodPost, disputePath, map[string]any{"result": "return"}, 403)
+	request(otherQuality, http.MethodPost, disputePath, map[string]any{"result": "return", "note": "请重做"}, 200)
 
 	var status string
 	if err := s.pool().QueryRow(ctx, `SELECT status FROM images WHERE id=$1`, id).Scan(&status); err != nil || status != "rejected" {
@@ -98,7 +98,7 @@ func TestGroupDispatchAndQualityWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondPath := fmt.Sprintf("/images/%d", secondID)
-	submission := map[string]any{"kind": "exception", "exception_reasons": []string{"blur"}}
+	submission := map[string]any{"kind": "exception", "exception_reasons": []string{"blurry"}}
 	request(annotator2, http.MethodPost, secondPath+"/submit", submission, 200)
 	request(reviewer, http.MethodPost, secondPath+"/review", map[string]any{"action": "reject", "comment": "重新判断模糊程度"}, 200)
 	request(annotator2, http.MethodPost, secondPath+"/submit", submission, 409)
@@ -107,11 +107,11 @@ func TestGroupDispatchAndQualityWorkflow(t *testing.T) {
 	}
 	request(otherQuality, http.MethodGet, "/quality/samples", nil, 200)
 	request(otherQuality, http.MethodPost, fmt.Sprintf("/quality/samples/%d", sample), map[string]any{"result": "pass"}, 200)
-	if err := s.pool().QueryRow(ctx, `SELECT id,arbiter_id FROM quality_disputes WHERE sample_id=$1`, sample).Scan(&dispute, &arbiter); err != nil || arbiter != q2 {
+	if err := s.pool().QueryRow(ctx, `SELECT id,arbiter_id FROM quality_disputes WHERE sample_id=$1`, sample).Scan(&dispute, &arbiter); err != nil || arbiter != q1 {
 		t.Fatalf("second arbiter: %d, err: %v", arbiter, err)
 	}
-	request(otherQuality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "approve"}, 200)
-	request(otherQuality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "return"}, 409)
+	request(quality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "approve"}, 200)
+	request(quality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "return"}, 409)
 	if err := s.pool().QueryRow(ctx, `SELECT status FROM images WHERE id=$1`, secondID).Scan(&status); err != nil || status != "excluded" {
 		t.Fatalf("approved exception status: %s, err: %v", status, err)
 	}
@@ -164,7 +164,7 @@ func TestStratifiedQualitySampling(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := fmt.Sprintf("/images/%d", task)
-			request(annotator, "POST", path+"/submit", map[string]any{"kind": "exception", "exception_reasons": []string{"blur"}}, 200)
+			request(annotator, "POST", path+"/submit", alignmentScore(10, 10, "用于分层抽样的维度评语"), 200)
 			request(reviewer, "POST", path+"/review", map[string]any{"action": "approve"}, 200)
 			var picked bool
 			if err := s.pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM quality_samples WHERE image_id=$1)`, task).Scan(&picked); err != nil || picked != (pos == 1) {

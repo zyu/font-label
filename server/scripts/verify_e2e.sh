@@ -73,34 +73,34 @@ check "审核员不能领取(FORBIDDEN)" "FORBIDDEN" \
 
 echo "== 7. 提交标注 =="
 SUB=$(curl -s -X POST "$API/images/$IMG1/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"11111111-1111-4111-8111-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":20,\"black\":20,\"variation\":15,\"structure\":15,\"control\":15},$DIMC,\"duration_ms\":42000}")
-check "总分 85 良好" "85 良好" "$(echo "$SUB" | jq -r '"\(.data.total) \(.data.grade)"')"
+  -d "{\"client_submit_id\":\"11111111-1111-4111-8111-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"S\",\"black\":\"S\",\"variation\":\"A\",\"structure\":\"A\",\"control\":\"A\"},$DIMC,\"duration_ms\":42000}")
+check "五维评级提交成功" "submitted" "$(echo "$SUB" | jq -r '.data.status')"
 check "状态 submitted" "submitted" "$(echo "$SUB" | jq -r '.data.status')"
-DIM_BACK=$(curl -s "$API/images/$IMG1" -H "Authorization: Bearer $ANN" | jq -r '.data.image.dim_comments.white // empty')
+DETAIL=$(curl -s "$API/images/$IMG1" -H "Authorization: Bearer $ANN")
+DIM_BACK=$(echo "$DETAIL" | jq -r '.data.image.dim_comments.white // empty')
 check "五维点评已存库（白平衡）" "空白停匀,笔画间距一致" "$DIM_BACK"
-MERGED=$(curl -s "$API/images/$IMG1" -H "Authorization: Bearer $ANN" | jq -r '.data.image.comment')
-check "合并点评含维度名" "yes" "$(echo "$MERGED" | grep -q '白平衡（匀）：' && echo yes || echo no)"
+check "五维评语独立保存" "5" "$(echo "$DETAIL" | jq -r '.data.image.dim_comments | length')"
 IDEM=$(curl -s -X POST "$API/images/$IMG1/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"11111111-1111-4111-8111-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":20,\"black\":20,\"variation\":15,\"structure\":15,\"control\":15},$DIMC}")
+  -d "{\"client_submit_id\":\"11111111-1111-4111-8111-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"S\",\"black\":\"S\",\"variation\":\"A\",\"structure\":\"A\",\"control\":\"A\"},$DIMC}")
 check "重复提交幂等" "true" "$(echo "$IDEM" | jq -r '.data.duplicate')"
 
 echo "== 8. 校验分支 =="
 BAD=$(curl -s -X POST "$API/images/$IMG2/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"22222222-2222-4222-8222-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":20,\"black\":20,\"variation\":15,\"structure\":15,\"control\":15},$DIMC_SHORT}")
+  -d "{\"client_submit_id\":\"22222222-2222-4222-8222-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"S\",\"black\":\"S\",\"variation\":\"A\",\"structure\":\"A\",\"control\":\"A\"},$DIMC_SHORT}")
 check "点评过短 422" "VALIDATION_FAILED" "$(echo "$BAD" | jq -r '.error.code')"
 MISS=$(curl -s -X POST "$API/images/$IMG2/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"33333333-3333-4333-8333-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":5},$DIMC}")
+  -d "{\"client_submit_id\":\"33333333-3333-4333-8333-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"C\"},$DIMC}")
 check "缺维度 422" "VALIDATION_FAILED" "$(echo "$MISS" | jq -r '.error.code')"
 
 echo "== 9. 异常上报 =="
 EXC=$(curl -s -X POST "$API/images/$IMG2/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"44444444-4444-4444-8444-$(printf '%012d' "$((10#$S))")\",\"kind\":\"exception\",\"exception_reasons\":[\"blur\",\"privacy\"],\"exception_note\":\"整张模糊且右上角有姓名\"}")
+  -d "{\"client_submit_id\":\"44444444-4444-4444-8444-$(printf '%012d' "$((10#$S))")\",\"kind\":\"exception\",\"exception_reasons\":[\"blurry\"],\"exception_note\":\"整张模糊，笔画无法辨认\"}")
 check "异常提交 kind=exception" "exception" "$(echo "$EXC" | jq -r '.data.kind')"
 
 echo "== 10. 第三张正常提交（用于打回重做）=="
 S3=$(curl -s -X POST "$API/images/$IMG3/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"55555555-5555-4555-8555-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":10,\"black\":10,\"variation\":10,\"structure\":10,\"control\":10},$DIMC}")
-check "第三张 50 分 需加油" "50 需加油" "$(echo "$S3" | jq -r '"\(.data.total) \(.data.grade)"')"
+  -d "{\"client_submit_id\":\"55555555-5555-4555-8555-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"B\",\"black\":\"B\",\"variation\":\"B\",\"structure\":\"B\",\"control\":\"B\"},$DIMC}")
+check "第三张提交成功" "submitted" "$(echo "$S3" | jq -r '.data.status')"
 
 echo "== 11. 审核队列（限本文件夹）=="
 Q=$(curl -s "$API/reviews/queue?folder_id=$FID" -H "Authorization: Bearer $REV")
@@ -128,7 +128,7 @@ check "已驳回 2 条" "2" "$(echo "$MINE" | jq -r '.data.total')"
 DET=$(curl -s "$API/images/$IMG2" -H "Authorization: Bearer $ANN")
 check "批注可见" "异常判定不成立，请按四维正常打分" "$(echo "$DET" | jq -r '.data.reviews[0].comment')"
 RE2=$(curl -s -X POST "$API/images/$IMG2/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"66666666-6666-4666-8666-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"scores\":{\"white\":15,\"black\":20,\"variation\":15,\"structure\":15,\"control\":15},$DIMC}")
+  -d "{\"client_submit_id\":\"66666666-6666-4666-8666-$(printf '%012d' "$((10#$S))")\",\"kind\":\"score\",\"grades\":{\"white\":\"A\",\"black\":\"S\",\"variation\":\"A\",\"structure\":\"A\",\"control\":\"A\"},$DIMC}")
 check "重做版本=2" "2" "$(echo "$RE2" | jq -r '.data.version')"
 HIST=$(curl -s "$API/images/$IMG2/history" -H "Authorization: Bearer $ANN")
 check "历史有 2 个版本" "2" "$(echo "$HIST" | jq -r '.data.versions | length')"
@@ -146,33 +146,9 @@ check "驳回原因有数据" "yes" "$([ "$(curl -s "$API/stats/rejections" -H "
 check "趋势 7 个点" "7" "$(curl -s "$API/stats/timeseries?days=7" -H "Authorization: Bearer $AT" | jq -r '.data.points | length')"
 check "我的统计 holding=1（第4张未提交）" "1" "$(curl -s "$API/stats/me" -H "Authorization: Bearer $ANN" | jq -r '.data.holding')"
 
-echo "== 15. 导出 =="
-curl -s -X POST "$API/exports" -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
-  -d "{\"format\":\"xlsx\",\"filters\":{\"folders\":[$FID],\"status\":\"all\"}}" -o /tmp/fl_export.xlsx
-check "xlsx 文件头 PK" "PK" "$(head -c 2 /tmp/fl_export.xlsx)"
-ROWS=$(unzip -p /tmp/fl_export.xlsx "$(unzip -l /tmp/fl_export.xlsx | awk '/xl\/worksheets\/sheet/{print $4}' | head -1)" | grep -o '<row ' | wc -l | tr -d ' ')
-check "xlsx 表头+4 行" "5" "$ROWS"
-curl -s -X POST "$API/exports" -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
-  -d "{\"format\":\"csv\",\"filters\":{\"folders\":[$FID],\"status\":\"all\"}}" -o /tmp/fl_export.csv
-check "csv 带 BOM" "yes" "$(head -c 3 /tmp/fl_export.csv | grep -q $'\xef\xbb\xbf' && echo yes || echo no)"
-check "csv 首列是文件夹名" "$FNAME" "$(sed -n '2p' /tmp/fl_export.csv | cut -d, -f1)"
-
-echo "== 15b. 训练集 ZIP =="
-curl -s -X POST "$API/exports" -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
-  -d "{\"format\":\"jsonl\",\"filters\":{\"folders\":[$FID],\"status\":\"all\"}}" -o /tmp/fl_train.zip
-unzip -p /tmp/fl_train.zip data.jsonl > /tmp/fl_train.jsonl
-J_LINES=$(wc -l < /tmp/fl_train.jsonl | tr -d ' ')
-check "jsonl 有样本" "yes" "$([ "${J_LINES:-0}" -ge 1 ] && echo yes || echo no)"
-check "每行字段恰好 messages+images" "$J_LINES" \
-  "$(jq -c 'select((keys|sort)==["images","messages"] and (.messages|length)==2)' /tmp/fl_train.jsonl | wc -l | tr -d ' ')"
-check "assistant 是五维分数或无效结论" "$J_LINES" \
-  "$(jq -r '.messages[1].content' /tmp/fl_train.jsonl | grep -cE '总分：|^无效：')"
-check "user 带 <image> 占位" "yes" \
-  "$(jq -r '.messages[0].content' /tmp/fl_train.jsonl | head -1 | grep -q '<image>' && echo yes || echo no)"
-check "ZIP 图片数与样本行数一致" "$J_LINES" \
-  "$(unzip -Z1 /tmp/fl_train.zip | grep -c '^images/[^/]*$')"
-check "ZIP 图片路径全局唯一且全部匹配 JSONL" "yes" \
-  "$(diff <(unzip -Z1 /tmp/fl_train.zip | grep '^images/' | sort) <(jq -r '.images[0]' /tmp/fl_train.jsonl | sort -u) >/dev/null && echo yes || echo no)"
+echo "== 15. 取数入口 =="
+check "平台导出下载停用" "404" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/exports" -H "Authorization: Bearer $AT")"
+check "历史下载链接停用" "404" "$(curl -s -o /dev/null -w '%{http_code}' "$API/exports/1/download" -H "Authorization: Bearer $AT")"
 
 echo "== 16. 权限 =="
 LOCKED=$(curl -s -X POST "$API/upload" -H "Authorization: Bearer $AT" \
@@ -196,16 +172,16 @@ check "gif 转存为 jpg" "jpg" "$(echo "$GIFUP" | jq -r '.data.items[0].stored_
 
 # 2) 非 UUID 的 client_submit_id：此前落库报 22P02 变 500，现在应 422
 BADUUID=$(curl -s -X POST "$API/images/$IMG4/submit" -H "Authorization: Bearer $ANN" -H 'Content-Type: application/json' \
-  -d "{\"client_submit_id\":\"not-a-uuid\",\"kind\":\"score\",\"scores\":{\"white\":10,\"black\":10,\"variation\":10,\"structure\":10,\"control\":10},$DIMC}")
+  -d "{\"client_submit_id\":\"not-a-uuid\",\"kind\":\"score\",\"grades\":{\"white\":\"B\",\"black\":\"B\",\"variation\":\"B\",\"structure\":\"B\",\"control\":\"B\"},$DIMC}")
 check "非 UUID 提交 422" "VALIDATION_FAILED" "$(echo "$BADUUID" | jq -r '.error.code')"
 
-# 3) 审核改分：总分重算 + 五维同步写回 + 审核留痕
+# 3) 审核等级修正：单维写回，保留审核记录
 PATCHED=$(curl -s -X POST "$API/images/$IMG2/review" -H "Authorization: Bearer $REV" -H 'Content-Type: application/json' \
-  -d '{"action":"approve","comment":"白平衡一维偏高，按 5 分复核","score_patch":{"white":5}}')
-check "改分后总分 70" "70" "$(echo "$PATCHED" | jq -r '.data.total')"
+  -d '{"action":"approve","comment":"白平衡一维偏高，按 C 级复核","grade_patch":{"white":"C"}}')
+check "等级修正后通过" "approved" "$(echo "$PATCHED" | jq -r '.data.status')"
 AFTER=$(curl -s "$API/images/$IMG2" -H "Authorization: Bearer $AT")
-check "改分已写回五维" "5" "$(echo "$AFTER" | jq -r '.data.image.scores.white')"
-check "改分在审核记录里留痕" "5" "$(echo "$AFTER" | jq -r '.data.reviews[0].score_patch.white')"
+check "等级已写回" "C" "$(echo "$AFTER" | jq -r '.data.image.grades.white')"
+check "审核记录保留等级修正" "C" "$(echo "$AFTER" | jq -r '.data.reviews[0].grade_patch.white')"
 
 # 4) 整包领取也要受持有上限约束（已持 1 张、上限 3 张、文件夹 4 张 → 只能再领 2 张）
 curl -s -X PUT "$API/settings/max_hold_per_user" -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' -d '3' >/dev/null
@@ -247,7 +223,7 @@ for f in "$FID" "$LOCKED_FID" "$GIF_FID" "$HOLD_FID"; do
         check "完成测试图 $image_id" "200" \
           "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/images/$image_id/submit" \
             -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
-            -d '{"kind":"exception","exception_reasons":["empty"],"exception_note":"自动化测试样本清理"}')" ;;
+            -d '{"kind":"exception","exception_reasons":["blank"],"exception_note":"自动化测试样本清理"}')" ;;
       submitted) ;;
       *) continue ;;
     esac

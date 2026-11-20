@@ -1,4 +1,7 @@
-import { Card, Col, Empty, Progress, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from "antd";
+import { useState } from "react";
+import { LEVELS } from "../lib/annotationLevels";
+import ListTable from "../components/ListTable";
+import { Card, Col, Empty, Progress, Row, Space, Statistic, Tag, Tooltip, Typography } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import {
   CartesianGrid,
@@ -11,7 +14,7 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../api/client";
-import type { FolderDTO } from "../api/types";
+import type { FolderDTO, Page } from "../api/types";
 import { useAuth } from "../auth";
 
 interface Overview {
@@ -26,7 +29,7 @@ interface Overview {
   today_submit: number;
   today_review: number;
   today_reject: number;
-  avg_total: number;
+  grade_distribution?: Record<string, Record<string, number>>;
   reject_rate: number;
 }
 
@@ -40,7 +43,7 @@ interface AnnotatorRow {
   rejected: number;
   pending: number;
   holding: number;
-  avg_total: number;
+  grade_distribution?: Record<string, number>;
   avg_ms: number;
   exceptions: number;
   reject_rate: number;
@@ -52,7 +55,9 @@ interface AnnotatorRow {
 }
 
 export default function StatsPage() {
-  const { user } = useAuth();
+  const [annotatorPage, setAnnotatorPage] = useState(1);
+  const [folderPage, setFolderPage] = useState(1);
+  const { user, me } = useAuth();
   const isAnnotator = user?.role === "annotator";
 
   const overview = useQuery({
@@ -61,13 +66,13 @@ export default function StatsPage() {
     enabled: !isAnnotator,
   });
   const annotators = useQuery({
-    queryKey: ["stats-annotators"],
-    queryFn: () => api.get<{ items: AnnotatorRow[] }>("/stats/annotators"),
+    queryKey: ["stats-annotators", annotatorPage],
+    queryFn: () => api.get<Page<AnnotatorRow>>(`/stats/annotators?page=${annotatorPage}&page_size=20`),
     enabled: !isAnnotator,
   });
   const folders = useQuery({
-    queryKey: ["stats-folders"],
-    queryFn: () => api.get<{ items: FolderDTO[] }>("/stats/folders"),
+    queryKey: ["stats-folders", folderPage],
+    queryFn: () => api.get<Page<FolderDTO>>(`/stats/folders?page=${folderPage}&page_size=20`),
     enabled: !isAnnotator,
   });
   const rejections = useQuery({
@@ -90,26 +95,37 @@ export default function StatsPage() {
         pending: number;
         submitted_today: number;
         granted: number;
-        avg_total: number;
+        grade_distribution?: Record<string, Record<string, number>>;
         reject_events: number;
       }>("/stats/me"),
-    enabled: isAnnotator,
+    enabled: isAnnotator || user?.role === "reviewer",
   });
+
+  const dimensions = me?.rubric?.dims ?? [];
+  const gradeDistribution = (distribution?: Record<string, Record<string, number>>) => (
+    <Card size="small" title={user?.role === "admin" ? "五维等级分布" : "我的五维等级分布"}>
+      <Space orientation="vertical" size={8}>
+        {dimensions.map(({ key, label }) => <Space key={key} wrap>
+          <Typography.Text strong>{label}</Typography.Text>
+          {LEVELS.map((level) => <Tag key={level}>{level} {distribution?.[key]?.[level] ?? 0}</Tag>)}
+        </Space>)}
+      </Space>
+    </Card>
+  );
 
   if (isAnnotator) {
     const m = mine.data;
     return (
-      <Space direction="vertical" size={14} style={{ width: "100%" }}>
-        <Row gutter={14}>
+      <Space orientation="vertical" className="stats-page" size={14}>
+        <Row gutter={[14, 14]}>
           {[
             ["待完成", m?.holding ?? 0, "#2b5cff"],
             ["累计驳回（次）", m?.reject_events ?? 0, "#cf1322"],
             ["待审核", m?.pending ?? 0, "#fa8c16"],
             ["已通过", m?.approved ?? 0, "#389e0d"],
             ["今日提交", m?.submitted_today ?? 0, "#722ed1"],
-            ["平均分", Number(m?.avg_total ?? 0).toFixed(1), "#13c2c2"],
           ].map(([label, value, color]) => (
-            <Col span={4} key={String(label)}>
+            <Col xs={24} sm={8} lg={4} key={String(label)}>
               <div className="stat-card">
                 <div className="stat-num" style={{ color: String(color) }}>
                   {value}
@@ -119,6 +135,7 @@ export default function StatsPage() {
             </Col>
           ))}
         </Row>
+        {gradeDistribution(m?.grade_distribution)}
         <Card size="small" title="我的情况">
           <Typography.Paragraph>
             累计领取 <b>{m?.granted ?? 0}</b> 张；累计被驳回 <b>{m?.reject_events ?? 0}</b> 次。
@@ -140,17 +157,16 @@ export default function StatsPage() {
     ["已打回", o?.rejected ?? 0, "#cf1322"],
     ["无效图", o?.excluded ?? 0, "#595959"],
     ["驳回率", `${Number(o?.reject_rate ?? 0).toFixed(1)}%`, "#cf1322"],
-    ["平均总分", Number(o?.avg_total ?? 0).toFixed(1), "#13c2c2"],
     ["今日提交", o?.today_submit ?? 0, "#722ed1"],
     ["今日审核", o?.today_review ?? 0, "#722ed1"],
     ["今日上传", o?.today_upload ?? 0, "#722ed1"],
   ];
 
   return (
-    <Space direction="vertical" size={14} style={{ width: "100%" }}>
+    <Space orientation="vertical" className="stats-page" size={14}>
       <Row gutter={[12, 12]}>
         {cards.map(([label, value, color]) => (
-          <Col span={4} key={label}>
+          <Col xs={24} sm={8} lg={4} key={label}>
             <div className="stat-card">
               <div className="stat-num" style={{ color }}>
                 {value}
@@ -161,8 +177,8 @@ export default function StatsPage() {
         ))}
       </Row>
 
-      <Row gutter={14}>
-        <Col span={15}>
+      <Row gutter={[14, 14]}>
+        <Col xs={24} lg={15}>
           <Card size="small" title="近 14 天：提交 / 通过 / 打回">
             <div style={{ height: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
@@ -180,7 +196,7 @@ export default function StatsPage() {
             </div>
           </Card>
         </Col>
-        <Col span={9}>
+        <Col xs={24} lg={9}>
           <Card size="small" title="驳回原因 TOP" style={{ height: "100%" }}>
             {rejections.data?.reasons?.length ? (
               rejections.data.reasons.map((r) => (
@@ -196,13 +212,14 @@ export default function StatsPage() {
         </Col>
       </Row>
 
+      {gradeDistribution(user?.role === "reviewer" ? mine.data?.grade_distribution : o?.grade_distribution)}
       <Card size="small" title="标注员情况">
-        <Table
+        <ListTable
           rowKey="id"
           size="small"
           loading={annotators.isLoading}
           dataSource={annotators.data?.items ?? []}
-          pagination={false}
+          pagination={{ current: annotatorPage, pageSize: 20, total: annotators.data?.total, onChange: setAnnotatorPage }}
           columns={[
             { title: "姓名", dataIndex: "name" },
             { title: "领取", dataIndex: "granted", sorter: (a: AnnotatorRow, b: AnnotatorRow) => a.granted - b.granted },
@@ -226,7 +243,9 @@ export default function StatsPage() {
                 </Tooltip>
               ),
             },
-            { title: "平均分", dataIndex: "avg_total", render: (v: number) => Number(v).toFixed(1) },
+            { title: "五维等级次数", render: (_: unknown, row: AnnotatorRow) => (
+              <Space size={2}>{LEVELS.map((level) => <Tag key={level}>{level} {row.grade_distribution?.[level] ?? 0}</Tag>)}</Space>
+            ) },
             { title: "平均耗时", dataIndex: "avg_ms", render: (v: number) => (v > 0 ? `${Math.round(v / 1000)}s` : "-") },
             { title: "异常上报", dataIndex: "exceptions" },
           ]}
@@ -234,11 +253,11 @@ export default function StatsPage() {
       </Card>
 
       <Card size="small" title="文件夹进度">
-        <Table
+        <ListTable
           rowKey="id"
           size="small"
           dataSource={folders.data?.items ?? []}
-          pagination={false}
+          pagination={{ current: folderPage, pageSize: 20, total: folders.data?.total, onChange: setFolderPage }}
           columns={[
             { title: "文件夹", dataIndex: "name" },
             { title: "总数", dataIndex: "total", width: 80 },

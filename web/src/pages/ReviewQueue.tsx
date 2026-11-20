@@ -1,10 +1,14 @@
-import { Badge, Button, Card, Empty, Segmented, Select, Space, Table, Tag, Typography } from "antd";
+import { useAuth } from "../auth";
+import RatingSummary from "../components/RatingSummary";
+import ListTable from "../components/ListTable";
+import { Badge, Button, Card, Empty, Segmented, Select, Space, Tag, Typography } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { STATUS_LABEL, type FolderDTO, type ImageDTO, type Page } from "../api/types";
 
 export default function ReviewQueuePage() {
+  const { me } = useAuth();
   const nav = useNavigate();
   const location = useLocation();
   const [params, setParams] = useSearchParams();
@@ -53,12 +57,12 @@ export default function ReviewQueuePage() {
       title: "类型",
       width: 100,
       render: (_: unknown, row: ImageDTO) =>
-        row.kind === "exception" ? <Tag color="orange">照片不合格</Tag> : <Tag color="blue">评分</Tag>,
+        row.kind === "exception" ? <Tag color="orange">照片不合格</Tag> : <Tag color="blue">评级</Tag>,
     },
     {
-      title: "总分",
+      title: "五维等级",
       width: 110,
-      render: (_: unknown, row: ImageDTO) => (row.total === null ? "-" : `${row.total} ${row.grade}`),
+      render: (_: unknown, row: ImageDTO) => <RatingSummary dimensions={me?.rubric.dims ?? []} grades={row.grades} />,
     },
     {
       title: "提交时间",
@@ -88,7 +92,7 @@ export default function ReviewQueuePage() {
               onChange={(v) => setFilter("kind", String(v))}
               options={[
                 { label: "全部", value: "" },
-                { label: "评分", value: "score" },
+                { label: "评级", value: "score" },
                 { label: "照片不合格", value: "exception" },
               ]}
             />
@@ -112,7 +116,7 @@ export default function ReviewQueuePage() {
       </Card>
 
       <Card size="small" title={`待审核队列（${queue.data?.total ?? 0}）`}>
-        <Table
+        <ListTable
           rowKey="id"
           size="middle"
           loading={queue.isLoading}

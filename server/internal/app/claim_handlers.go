@@ -215,6 +215,8 @@ func (s *Server) handleMyTasks(c *gin.Context) {
 		clause = "i.annotator_id=$1 AND i.status='rejected' AND NOT i.quality_pending"
 	case "submitted":
 		clause = "i.annotator_id=$1 AND (i.status='submitted' OR i.quality_pending)"
+	case "exception_locked":
+		clause = "i.annotator_id=$1 AND i.status='exception_locked'"
 	case "approved":
 		clause = "i.annotator_id=$1 AND i.status IN ('approved','excluded') AND NOT i.quality_pending"
 	default:

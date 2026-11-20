@@ -1,11 +1,12 @@
+import ListTable from "../components/ListTable";
 import { useState } from "react";
-import { Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Segmented, Select, Space, Table, Tabs, Tag, message } from "antd";
+import { Alert, Button, Card, Descriptions, Drawer, Form, Input, InputNumber, Segmented, Select, Space, Tabs, Tag, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Page } from "../api/types";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
-import { exceptionReasons } from "../lib/settings";
+import { exceptionReasonLabel } from "../lib/settings";
 
 interface QualityRecord {
   id: number;
@@ -21,14 +22,13 @@ interface QualityRecord {
   version: number;
   annotation: {
     kind?: "score" | "exception";
-    scores?: Record<string, number>;
+    grades?: Record<string, string>;
     dim_comments?: Record<string, string>;
-    total?: number;
     comment?: string;
     exception_reasons?: string[];
     exception_note?: string;
   };
-  score_patch: Record<string, number> | null;
+  grade_patch: Record<string, string> | null;
   quality_result: "" | "pass" | "fail";
   quality_note: string;
   inspector: string;
@@ -36,6 +36,8 @@ interface QualityRecord {
   arbiter: string;
   ruling: "" | "return" | "approve";
   ruling_note: string;
+  self_arbitrated?: boolean;
+  awaiting_arbiter?: boolean;
   registered_at: string | null;
   resolved_at: string | null;
 }
@@ -93,9 +95,9 @@ export default function Quality() {
     queryFn: () => api.get<Page<QualityRecord>>(`/quality/${tab}?status=${status}&page=${page}&page_size=20`),
   });
   const decide = useMutation({
-    mutationFn: ({ id, result }: { id: number; result: string }) => api.post(`/quality/${tab}/${id}`, { result, note }),
-    onSuccess: () => {
-      message.success("结论已保存");
+    mutationFn: ({ id, result }: { id: number; result: string }) => api.post<{ awaiting_arbiter?: boolean }>(`/quality/${tab}/${id}`, { result, note }),
+    onSuccess: (outcome) => {
+      message.success(outcome?.awaiting_arbiter ? "结论已保存，争议已挂起待分配独立仲裁员" : "结论已保存");
       setSelected(undefined);
       cache.invalidateQueries({ queryKey: ["quality"] });
     },
@@ -117,7 +119,7 @@ export default function Quality() {
           { label: "全部", value: "all" },
         ]} style={{ marginBottom: 12 }} />
         {list.error && <Alert type="error" message={list.error.message} />}
-        <Table<QualityRecord> rowKey="id" size="small" loading={list.isFetching} dataSource={tasks}
+        <ListTable<QualityRecord> rowKey="id" size="small" loading={list.isFetching} dataSource={tasks}
           pagination={{ current: page, pageSize: 20, total: list.data?.total, onChange: setPage, showSizeChanger: false }}
           columns={[
             ...(disputes ? [{ title: "登记编号", dataIndex: "dispute_id" }] : []),
@@ -128,8 +130,8 @@ export default function Quality() {
             { title: "质检员", dataIndex: "inspector", render: (value: string) => value || "待分配" },
             { title: "质检结论", render: (_, row) => row.quality_result ? qualityLabels[row.quality_result] : "待质检" },
             ...(disputes ? [
-              { title: "仲裁员", dataIndex: "arbiter" },
-              { title: "仲裁状态", render: (_: unknown, row: QualityRecord) => <Tag color={row.ruling ? "green" : "orange"}>{row.ruling ? `已仲裁 · ${rulingLabels[row.ruling]}` : "待仲裁"}</Tag> },
+              { title: "仲裁员", dataIndex: "arbiter", render: (value: string, row: QualityRecord) => <Space>{value || "待分配"}{row.self_arbitrated && <Tag color="red">同人质检与仲裁</Tag>}</Space> },
+              { title: "仲裁状态", render: (_: unknown, row: QualityRecord) => <Tag color={row.ruling ? "green" : "orange"}>{row.ruling ? `已仲裁 · ${rulingLabels[row.ruling]}` : row.awaiting_arbiter ? "待分配独立仲裁员" : "待仲裁"}</Tag> },
               { title: "仲裁时间", render: (_: unknown, row: QualityRecord) => timeLabel(row.resolved_at) },
             ] : []),
           ]}
@@ -139,18 +141,18 @@ export default function Quality() {
       <Drawer width="min(980px, 100vw)" title={selected ? `${selected.sample_id} · ${selected.group}` : ""} open={!!selected}
         onClose={() => setSelected(undefined)}>
         {selected && <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <div style={{ height: 360 }}><ImageViewer src={selected.original_url} alt={selected.image} resetKey={selected.image_id} /></div>
+          <div className="quality-image-frame"><ImageViewer src={selected.original_url} alt={selected.image} resetKey={selected.image_id} /></div>
           <Descriptions bordered size="small" column={1}>
-            <Descriptions.Item label="标注">{selected.annotator || "—"} · 第 {selected.version} 版 {selected.annotation.total != null && `· 总分 ${selected.annotation.total}`}</Descriptions.Item>
+            <Descriptions.Item label="标注">{selected.annotator || "—"} · 第 {selected.version} 版</Descriptions.Item>
             {selected.annotation.kind === "exception" ? (
               <Descriptions.Item label="异常原因">
-                {selected.annotation.exception_reasons?.map((key) => exceptionReasons(me?.exception_reasons).find((item) => item.key === key)?.label ?? key).join("、")}
+                {selected.annotation.exception_reasons?.map((key) => exceptionReasonLabel(key, me?.exception_reasons)).join("、")}
                 {selected.annotation.exception_note || selected.annotation.comment}
               </Descriptions.Item>
             ) : me?.rubric.dims.map((dim) => (
               <Descriptions.Item key={dim.key} label={dim.label}>
-                {selected.annotation.scores?.[dim.key] ?? "—"}
-                {selected.score_patch?.[dim.key] != null && ` · 审核改分 ${selected.score_patch[dim.key]}`}
+                {selected.annotation.grades?.[dim.key] ?? "—"}
+                {selected.grade_patch?.[dim.key] != null && ` · 审核修正为 ${selected.grade_patch[dim.key]}`}
                 {selected.annotation.dim_comments?.[dim.key] && ` · ${selected.annotation.dim_comments[dim.key]}`}
               </Descriptions.Item>
             ))}
@@ -159,7 +161,9 @@ export default function Quality() {
             {!!selected.dispute_id && <Descriptions.Item label="争议登记">#{selected.dispute_id} · {timeLabel(selected.registered_at)}</Descriptions.Item>}
             {selected.ruling && <Descriptions.Item label="仲裁">{selected.arbiter} · {rulingLabels[selected.ruling]} · {timeLabel(selected.resolved_at)} {selected.ruling_note}</Descriptions.Item>}
           </Descriptions>
-          {!admin && !completed && (
+          {selected.awaiting_arbiter && <Alert type="warning" title="暂无独立仲裁员，已挂起待分配" />}
+          {selected.self_arbitrated && <Alert type="warning" title="历史记录由同一人质检和仲裁" />}
+          {!admin && !completed && !selected.awaiting_arbiter && !selected.self_arbitrated && (
             <>
               <Input.TextArea aria-label="处理备注" placeholder="处理备注" value={note} onChange={(event) => setNote(event.target.value)} maxLength={1000} />
               <Space>

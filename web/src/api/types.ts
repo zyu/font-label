@@ -1,3 +1,5 @@
+import type { Level } from "../lib/annotationLevels";
+
 export type Role = "admin" | "reviewer" | "annotator" | "quality";
 
 export interface User {
@@ -12,29 +14,14 @@ export interface User {
 export interface Dim {
   key: string;
   label: string;
-  weight: number;
-  max: number;
-  /** 可选：打分步长（5 = 只能 0/5/10/15/20） */
-  step?: number;
 }
-
-export interface Band {
-  label: string;
-  min: number;
-}
-
 export interface Rubric {
   id: number;
   name: string;
   dims: Dim[];
-  grade_bands: Band[];
-  /** 旧：单条总点评的字数范围（保留兼容，界面已改为按维度点评） */
-  comment_min: number;
-  comment_max: number;
-  /** 每个维度的点评字数范围（现行：10~50 字） */
+  levels: Level[];
   dim_comment_min: number;
   dim_comment_max: number;
-  allow_total_override: boolean;
 }
 
 export interface Limits {
@@ -62,7 +49,8 @@ export type ImageStatus =
   | "submitted"
   | "approved"
   | "rejected"
-  | "excluded";
+  | "excluded"
+  | "exception_locked";
 
 export interface ImageDTO {
   group_id?: number;
@@ -84,10 +72,8 @@ export interface ImageDTO {
   reject_count: number;
   review_count: number;
   kind: "score" | "exception" | "";
-  total: number | null;
-  grade: string;
   comment: string;
-  scores: Record<string, number>;
+  grades: Record<string, Level>;
   /** 五维各自的点评：{ white: "...", black: "..." } */
   dim_comments: Record<string, string>;
   exception_reasons: string[];
@@ -106,7 +92,7 @@ export interface Review {
   comment: string;
   reason_tags: string[];
   reviewer: string;
-  score_patch?: Record<string, number>;
+  grade_patch?: Record<string, Level>;
   created_at: string;
   annotation_version: number;
 }
@@ -118,7 +104,7 @@ export interface ImageDetail {
 }
 
 export interface Draft {
-  scores?: Record<string, number>;
+  grades?: Record<string, Level>;
   /** 五维各自的点评 */
   dim_comments?: Record<string, string>;
   comment?: string;
@@ -165,6 +151,7 @@ export const STATUS_LABEL: Record<string, string> = {
   approved: "已通过",
   rejected: "已打回",
   excluded: "无效图",
+  exception_locked: "对组异常已确认",
 };
 
 export const STATUS_COLOR: Record<string, string> = {
@@ -174,4 +161,5 @@ export const STATUS_COLOR: Record<string, string> = {
   approved: "success",
   rejected: "error",
   excluded: "default",
+  exception_locked: "default",
 };

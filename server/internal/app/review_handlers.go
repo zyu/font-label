@@ -71,7 +71,7 @@ func (s *Server) handleMyReviews(c *gin.Context) {
 		   JOIN images i ON i.id = r.image_id
 		   JOIN folders f ON f.id = i.folder_id
 		   LEFT JOIN users u ON u.id = i.annotator_id
-		  WHERE r.reviewer_id = $1
+		  WHERE r.reviewer_id=$1 AND r.annotation_version>i.voided_through_version
 		  ORDER BY r.created_at DESC LIMIT $2 OFFSET $3`, me.ID, size, (page-1)*size)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -112,11 +112,12 @@ func (s *Server) handleReview(c *gin.Context) {
 		return
 	}
 	var in struct {
-		Action     string         `json:"action"`
-		Comment    string         `json:"comment"`
-		ReasonTags []string       `json:"reason_tags"`
-		ScorePatch map[string]int `json:"score_patch"`
-		Drawings   []any          `json:"drawings"`
+		Action      string            `json:"action"`
+		Comment     string            `json:"comment"`
+		ReasonTags  []string          `json:"reason_tags"`
+		GradePatch  map[string]string `json:"grade_patch"`
+		LegacyPatch json.RawMessage   `json:"score_patch"`
+		Drawings    []any             `json:"drawings"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		httpx.Fail(c, httpx.BadRequest("请求体格式错误"))
@@ -150,18 +151,18 @@ func (s *Server) handleReview(c *gin.Context) {
 		kind        string
 		annID       int64
 		version     int
-		oldScores   string
+		oldGrades   string
 	)
 	err = s.pool().QueryRow(ctx,
 		`SELECT i.status, COALESCE(i.annotator_id,0), COALESCE(a.kind,''), COALESCE(a.id,0),
-		        COALESCE(a.version,0), COALESCE(a.scores::text,'{}')
+		        COALESCE(a.version,0), COALESCE(a.grades::text,'{}')
 		   FROM images i LEFT JOIN annotations a ON a.image_id=i.id WHERE i.id=$1`, id).
-		Scan(&status, &annotatorID, &kind, &annID, &version, &oldScores)
+		Scan(&status, &annotatorID, &kind, &annID, &version, &oldGrades)
 	if err != nil {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
-	if err := s.requireImageAccess(c, id, annotatorID); err != nil {
+	if err := requireImageAccess(c, s.pool(), id, annotatorID); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
@@ -194,23 +195,26 @@ func (s *Server) handleReview(c *gin.Context) {
 
 	var patchJSON []byte
 	var mergedJSON []byte
-	var newTotal float64
-	if len(in.ScorePatch) > 0 {
+
+	if len(in.LegacyPatch) > 0 {
+		httpx.Fail(c, httpx.Validation(map[string]string{"grade_patch": "请提交字母等级"}, "请通过 grade_patch 修正等级"))
+		return
+	}
+	if len(in.GradePatch) > 0 {
 		if kind != "score" {
-			httpx.Fail(c, httpx.Validation(map[string]string{"score_patch": "异常图不能改分"}, "异常图不能改分"))
+			httpx.Fail(c, httpx.Validation(map[string]string{"grade_patch": "异常图不能修正等级"}, "异常图不能修正等级"))
 			return
 		}
-		merged := map[string]int{}
-		_ = json.Unmarshal([]byte(oldScores), &merged)
-		for k, v := range in.ScorePatch {
+		merged := map[string]string{}
+		_ = json.Unmarshal([]byte(oldGrades), &merged)
+		for k, v := range in.GradePatch {
 			merged[k] = v
 		}
-		if err := rubric.ValidatePatch(in.ScorePatch); err != nil {
-			httpx.Fail(c, httpx.Validation(map[string]string{"score_patch": err.Error()}, err.Error()))
+		if err := rubric.ValidateGrades(in.GradePatch, true); err != nil {
+			httpx.Fail(c, httpx.Validation(map[string]string{"grade_patch": err.Error()}, err.Error()))
 			return
 		}
-		newTotal, _ = rubric.Total(merged)
-		patchJSON, _ = json.Marshal(in.ScorePatch)
+		patchJSON, _ = json.Marshal(in.GradePatch)
 		mergedJSON, _ = json.Marshal(merged)
 	}
 
@@ -221,6 +225,10 @@ func (s *Server) handleReview(c *gin.Context) {
 
 	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(732140, 1)`); err != nil {
+			return err
+		}
+		sourceID, err := lockTaskSource(ctx, tx, id)
+		if err != nil {
 			return err
 		}
 		var groupID int64
@@ -244,22 +252,25 @@ func (s *Server) handleReview(c *gin.Context) {
 		var reviewID int64
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO reviews (image_id, annotation_id, annotation_version, reviewer_id,
-			        action, comment, reason_tags, score_patch, drawings)
+			        action, comment, reason_tags, grade_patch, drawings)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb) RETURNING id`,
 			id, annID, version, me.ID, in.Action, in.Comment, in.ReasonTags, patchJSON, drawingsJSON).Scan(&reviewID); err != nil {
 			return err
 		}
-		if len(in.ScorePatch) > 0 {
-			grade := rubric.Grade(newTotal)
-			// 五维分数一起写回：只改 total 会导致导出/复核时的维度分与总分对不上
+		if len(in.GradePatch) > 0 {
 			if _, err := tx.Exec(ctx,
-				`UPDATE annotations SET scores=$4::jsonb, total=$2, grade=$3, updated_at=now() WHERE image_id=$1`,
-				id, newTotal, grade, mergedJSON); err != nil {
+				`UPDATE annotations SET grades=$2::jsonb, updated_at=now() WHERE image_id=$1`,
+				id, mergedJSON); err != nil {
 				return err
 			}
 		}
 		if groupID != 0 {
 			if err := s.enqueueQualitySample(c, tx, id, reviewID, in.Action); err != nil {
+				return err
+			}
+		}
+		if sourceID != 0 && kind == "exception" {
+			if _, err := tx.Exec(ctx, `SELECT sync_group_exception_locks($1)`, []int64{sourceID}); err != nil {
 				return err
 			}
 		}
@@ -271,5 +282,5 @@ func (s *Server) handleReview(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	httpx.OK(c, gin.H{"status": newStatus, "image_id": id, "total": newTotal})
+	httpx.OK(c, gin.H{"status": newStatus, "image_id": id})
 }

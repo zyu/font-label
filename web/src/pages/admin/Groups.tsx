@@ -1,5 +1,6 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
-import { Alert, Button, Card, Form, Input, Modal, Segmented, Select, Space, Switch, Table, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Segmented, Select, Space, Switch, Tag, Typography, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { FolderDTO, ImageDTO, Page, User } from "../../api/types";
@@ -85,7 +86,7 @@ export default function Groups() {
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card title="人员分组" extra={<Button type="primary" onClick={() => edit()}>新建分组</Button>}>
         {(groupList.error || users.error) && <Alert type="error" message={(groupList.error ?? users.error)?.message} />}
-        <Table<Group>
+        <ListTable<Group>
           rowKey="id"
           size="small"
           loading={groupList.isLoading || users.isLoading}
@@ -129,7 +130,7 @@ export default function Groups() {
               <Input.Search allowClear placeholder="按文件名或样本编号搜索" onSearch={(value) => { setSearch(value); setPage(1); }} />
               <Typography.Text type="secondary">已选 {selected.length} 张</Typography.Text>
             </Space>
-            <Table<ImageDTO> size="small" rowKey="id" loading={sources.isFetching} dataSource={sources.data?.items ?? []}
+            <ListTable<ImageDTO> size="small" rowKey="id" loading={sources.isFetching} dataSource={sources.data?.items ?? []}
               rowSelection={{ selectedRowKeys: selected, preserveSelectedRowKeys: true, onChange: (keys) => setSelected(keys.map(Number)) }}
               pagination={{ current: page, pageSize: 20, total: sources.data?.total, onChange: setPage, showSizeChanger: false }}
               columns={[

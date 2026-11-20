@@ -3,11 +3,11 @@ import { Button, Dropdown, Input } from "antd";
 import { DownOutlined } from "@ant-design/icons";
 import type { Dim } from "../api/types";
 import type { DimCommentState } from "../lib/dimComments";
-import { LEVELS, commentChoices, levelForScore, levelGuide, scoreForLevel, type Level } from "../lib/annotationLevels";
+import { LEVELS, commentChoices, levelGuide, type Level } from "../lib/annotationLevels";
 
 interface Props {
   dim: Dim;
-  score?: number;
+  grade?: Level;
   comment: DimCommentState;
   templates: unknown;
   minLength: number;
@@ -25,20 +25,19 @@ const gradeMovement: Record<string, number | undefined> = { ArrowLeft: -1, Arrow
 const shortNames: Record<string, string> = { white: "匀", black: "稳" };
 
 export default function DimensionGradeCard({
-  dim, score, comment, templates, minLength, maxLength, editable, frozen, active, invalid,
+  dim, grade, comment, templates, minLength, maxLength, editable, frozen, active, invalid,
   onActivate, onPick, onComment,
 }: Props) {
   const id = useId();
-  const grade = levelForScore(dim, score);
   const guide = grade && levelGuide[grade];
-  const levels = LEVELS.filter((level) => levelForScore(dim, scoreForLevel(dim, level)) === level);
+  const levels = LEVELS;
   const canWrite = editable && !frozen && !!grade;
   const choices = grade ? commentChoices(templates, dim.key, grade) : [];
   const shortName = shortNames[dim.key];
 
   function moveGrade(event: KeyboardEvent<HTMLDivElement>, currentLevel: Level) {
     const offset = gradeMovement[event.key];
-    if (offset === undefined || !editable || frozen || levels.length === 0) return;
+    if (offset === undefined || !editable || frozen) return;
     event.preventDefault();
     const index = levels.indexOf(currentLevel);
     const next = levels[(index + offset + levels.length) % levels.length];
@@ -61,9 +60,9 @@ export default function DimensionGradeCard({
           }}>
           {LEVELS.map((level) => (
             <button key={level} type="button" role="radio" aria-checked={level === grade} data-level={level}
-              title={!levels.includes(level) ? "当前评分方案未配置此档" : levelGuide[level].title}
+              title={levelGuide[level].title}
               tabIndex={(grade ?? levels[0]) === level ? 0 : -1}
-              disabled={!editable || frozen || !levels.includes(level)} onClick={() => onPick(level)}>
+              disabled={!editable || frozen} onClick={() => onPick(level)}>
               {level}
             </button>
           ))}

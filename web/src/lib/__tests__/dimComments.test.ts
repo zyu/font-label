@@ -3,11 +3,11 @@ import { charCount, dimCommentStates, dimCommentsOk, firstBlockingDimComment } f
 import type { Dim } from "../../api/types";
 
 const DIMS: Dim[] = [
-  { key: "white", label: "白平衡（匀）", weight: 0.2, max: 20, step: 5 },
-  { key: "black", label: "黑平衡（稳）", weight: 0.2, max: 20, step: 5 },
-  { key: "variation", label: "参差", weight: 0.2, max: 20, step: 5 },
-  { key: "structure", label: "结构", weight: 0.2, max: 20, step: 5 },
-  { key: "control", label: "控笔", weight: 0.2, max: 20, step: 5 },
+  { key: "white", label: "白平衡（匀）" },
+  { key: "black", label: "黑平衡（稳）" },
+  { key: "variation", label: "参差" },
+  { key: "structure", label: "结构" },
+  { key: "control", label: "控笔" },
 ];
 
 const text = (n: number) => "字".repeat(n);

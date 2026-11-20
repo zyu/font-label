@@ -1,5 +1,6 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
-import { Alert, Button, Card, Input, Select, Space, Table, Tag, Typography, Upload, message } from "antd";
+import { Alert, Button, Card, Input, Select, Space, Tag, Typography, Upload, message } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
@@ -147,11 +148,11 @@ export default function UploadPage() {
 
       {items.length > 0 && (
         <Card size="small" title="本次上传结果">
-          <Table
+          <ListTable
             rowKey={(r) => r.file + (r.image_id ?? 0)}
             size="small"
             dataSource={items}
-            pagination={false}
+            pagination={{ pageSize: 20 }}
             columns={[
               { title: "原文件名", dataIndex: "file" },
               {

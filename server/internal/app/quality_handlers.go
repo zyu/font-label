@@ -126,13 +126,19 @@ func (s *Server) enqueueQualitySample(c *gin.Context, tx pgx.Tx, imageID, review
 func assignUnclaimedSamples(ctx context.Context, tx pgx.Tx) error {
 	_, err := tx.Exec(ctx, `UPDATE quality_samples q SET inspector_id=ids[1+((q.sample_order-1) % cardinality(ids))]
 		FROM (`+activeQualityUsersSQL+`) active
-		WHERE q.inspector_id IS NULL AND q.result IS NULL AND cardinality(ids)>0`)
+		WHERE q.inspector_id IS NULL AND q.result IS NULL AND cardinality(ids)>0
+		  AND EXISTS (SELECT 1 FROM reviews r JOIN images i ON i.id=r.image_id
+		              WHERE r.id=q.review_id AND r.annotation_version>i.voided_through_version)`)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `SELECT assign_pending_quality_disputes()`)
 	return err
 }
 
 const qualityFrom = ` FROM quality_samples q
 	JOIN reviews r ON r.id=q.review_id
-	JOIN images i ON i.id=q.image_id
+	JOIN images i ON i.id=q.image_id AND r.annotation_version>i.voided_through_version
 	LEFT JOIN annotation_groups g ON g.id=i.group_id
 	LEFT JOIN users inspector ON inspector.id=q.inspector_id
 	LEFT JOIN quality_disputes d ON d.sample_id=q.id
@@ -179,7 +185,8 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 		SELECT q.id,i.id,i.sample_no,i.stored_name,COALESCE(g.name,''), r.action, r.comment,r.annotation_version,
 		       COALESCE(q.result,''),q.note,COALESCE(inspector.display_name,''),q.finished_at,
 		       COALESCE(d.id,0),COALESCE(arbiter.display_name,''),COALESCE(d.result,''),COALESCE(d.note,''),
-		       d.created_at,d.finished_at,COALESCE(v.payload,'{}'),r.score_patch,
+		       d.created_at,d.finished_at,COALESCE(v.payload,'{}'),r.grade_patch,
+		       COALESCE(d.arbiter_id=q.inspector_id,false), (d.id IS NOT NULL AND d.arbiter_id IS NULL),
 		       COALESCE(reviewer.display_name,''),COALESCE(annotator.display_name,'')`+qualityFrom+clause+
 		" ORDER BY "+order+" LIMIT $"+itoa(len(args)-1)+" OFFSET $"+itoa(len(args)), args...)
 	if err != nil {
@@ -192,11 +199,12 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 		var sampleID, imageID, number, disputeID int64
 		var name, group, review, reviewNote, qc, qcNote, inspector, arbiter, ruling, rulingNote, reviewer, annotator string
 		var version int
+		var selfArbitrated, awaitingArbiter bool
 		var annotation, patch any
 		var checkedAt, registeredAt, resolvedAt any
 		if err := rows.Scan(&sampleID, &imageID, &number, &name, &group, &review, &reviewNote, &version,
 			&qc, &qcNote, &inspector, &checkedAt, &disputeID, &arbiter, &ruling, &rulingNote,
-			&registeredAt, &resolvedAt, &annotation, &patch, &reviewer, &annotator); err != nil {
+			&registeredAt, &resolvedAt, &annotation, &patch, &selfArbitrated, &awaitingArbiter, &reviewer, &annotator); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
@@ -204,9 +212,10 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 			"id": sampleID, "image_id": imageID, "sample_id": fmt.Sprintf("P%06d", number),
 			"image": name, "group": group, "original_url": s.signURL(imageID, "original"),
 			"review": review, "review_note": reviewNote, "version": version, "annotation": annotation,
-			"score_patch": patch, "reviewer": reviewer, "annotator": annotator,
+			"grade_patch": patch, "reviewer": reviewer, "annotator": annotator,
 			"quality_result": qc, "quality_note": qcNote, "inspector": inspector, "checked_at": checkedAt,
 			"dispute_id": disputeID, "arbiter": arbiter, "ruling": ruling, "ruling_note": rulingNote,
+			"self_arbitrated": selfArbitrated, "awaiting_arbiter": awaitingArbiter,
 			"registered_at": registeredAt, "resolved_at": resolvedAt,
 		})
 	}
@@ -239,21 +248,38 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 	ctx := c.Request.Context()
 	user := auth.MustCurrent(c)
 	input.Note = strings.TrimSpace(input.Note)
+	awaitingArbiter := false
 	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
 		var imageID, sampleID, ownerID int64
+		lookup := `SELECT image_id FROM quality_samples WHERE id=$1`
+		if dispute {
+			lookup = `SELECT q.image_id FROM quality_disputes d JOIN quality_samples q ON q.id=d.sample_id WHERE d.id=$1`
+		}
+		if err := tx.QueryRow(ctx, lookup, id).Scan(&imageID); errors.Is(err, pgx.ErrNoRows) {
+			return httpx.NotFound("记录不存在")
+		} else if err != nil {
+			return err
+		}
+		sourceID, err := lockTaskSource(ctx, tx, imageID)
+		if err != nil {
+			return err
+		}
 		var review, previous string
 		query := `SELECT q.image_id,q.id,COALESCE(q.inspector_id,0),r.action,COALESCE(q.result,'')` +
 			qualityFrom + ` WHERE q.id=$1 FOR UPDATE OF i`
 		if dispute {
-			query = `SELECT q.image_id,q.id,d.arbiter_id,r.action,COALESCE(d.result,'')` +
-				qualityFrom + ` WHERE d.id=$1 FOR UPDATE OF i`
+			query = `SELECT q.image_id,q.id,COALESCE(d.arbiter_id,0),r.action,COALESCE(d.result,'')` +
+				qualityFrom + ` WHERE d.id=$1 AND d.arbiter_id IS DISTINCT FROM q.inspector_id FOR UPDATE OF i`
 		}
-		err := tx.QueryRow(ctx, query, id).Scan(&imageID, &sampleID, &ownerID, &review, &previous)
+		err = tx.QueryRow(ctx, query, id).Scan(&imageID, &sampleID, &ownerID, &review, &previous)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return httpx.NotFound("记录不存在")
 		}
 		if err != nil {
 			return err
+		}
+		if dispute && ownerID == 0 {
+			return httpx.Conflict("暂无独立仲裁员，已挂起待分配")
 		}
 		if ownerID != user.ID {
 			return httpx.Forbidden("该记录未分配给你")
@@ -263,7 +289,14 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		}
 		detail := map[string]any{"image_id": imageID, "result": input.Result, "note": input.Note}
 		if dispute {
-			return s.resolveDispute(c, tx, id, imageID, input.Result, input.Note, detail)
+			if err := s.resolveDispute(c, tx, id, imageID, input.Result, input.Note, detail); err != nil {
+				return err
+			}
+			if sourceID != 0 {
+				_, err := tx.Exec(ctx, `SELECT sync_group_exception_locks($1)`, []int64{sourceID})
+				return err
+			}
+			return nil
 		}
 		tag, err := tx.Exec(ctx, `UPDATE quality_samples SET result=$2,note=$3,finished_at=now()
 			WHERE id=$1 AND result IS NULL`, sampleID, input.Result, input.Note)
@@ -280,8 +313,14 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 			}
 			detail["dispute_id"] = disputeID
 			detail["arbiter_id"] = arbiterID
+			awaitingArbiter = arbiterID == nil
 		} else if _, err := tx.Exec(ctx, `UPDATE images SET quality_pending=false WHERE id=$1`, imageID); err != nil {
 			return err
+		}
+		if sourceID != 0 && input.Result == "fail" && review == "approve" {
+			if _, err := tx.Exec(ctx, `SELECT sync_group_exception_locks($1)`, []int64{sourceID}); err != nil {
+				return err
+			}
 		}
 		return s.insertAudit(c, tx, "quality.check", "quality_sample", sampleID, detail)
 	})
@@ -289,24 +328,20 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		httpx.Fail(c, err)
 		return
 	}
-	httpx.OK(c, gin.H{"ok": true})
+	httpx.OK(c, gin.H{"ok": true, "awaiting_arbiter": awaitingArbiter})
 }
 
-func registerDispute(ctx context.Context, tx pgx.Tx, sampleID int64) (int64, int64, error) {
-	var last, arbiter, disputeID int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(last_arbiter_id,0) FROM quality_policy WHERE singleton FOR UPDATE`).Scan(&last); err != nil {
-		return 0, 0, err
+func registerDispute(ctx context.Context, tx pgx.Tx, sampleID int64) (int64, *int64, error) {
+	var id int64
+	if err := tx.QueryRow(ctx, `INSERT INTO quality_disputes (sample_id) VALUES ($1) RETURNING id`, sampleID).Scan(&id); err != nil {
+		return 0, nil, err
 	}
-	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE role='quality' AND status='active'
-		ORDER BY (id<=$1),id LIMIT 1`, last).Scan(&arbiter); err != nil {
-		return 0, 0, err
+	if _, err := tx.Exec(ctx, `SELECT assign_pending_quality_disputes()`); err != nil {
+		return 0, nil, err
 	}
-	if err := tx.QueryRow(ctx, `INSERT INTO quality_disputes (sample_id,arbiter_id) VALUES ($1,$2) RETURNING id`,
-		sampleID, arbiter).Scan(&disputeID); err != nil {
-		return 0, 0, err
-	}
-	_, err := tx.Exec(ctx, `UPDATE quality_policy SET last_arbiter_id=$1 WHERE singleton`, arbiter)
-	return disputeID, arbiter, err
+	var arbiter *int64
+	err := tx.QueryRow(ctx, `SELECT arbiter_id FROM quality_disputes WHERE id=$1`, id).Scan(&arbiter)
+	return id, arbiter, err
 }
 
 func (s *Server) resolveDispute(c *gin.Context, tx pgx.Tx, id, imageID int64, result, note string, detail map[string]any) error {

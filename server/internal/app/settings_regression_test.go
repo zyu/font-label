@@ -89,7 +89,7 @@ func TestSettingsValidationPreservesStoredValue(t *testing.T) {
 }
 
 func TestTableFiveGradeBandsMigration(t *testing.T) {
-	s, _, _ := regressionServer(t)
+	s, _, _ := regressionServerBefore(t, "00013_letter_ratings.sql")
 	ctx := context.Background()
 	// Exercise an upgrade of an already customized active rubric.
 	oldBands := `[{"label":"优秀","min":90},{"label":"良好","min":80},{"label":"中等","min":60},{"label":"较差","min":0}]`
@@ -103,23 +103,20 @@ func TestTableFiveGradeBandsMigration(t *testing.T) {
 	if _, err := s.pool().Exec(ctx, strings.Split(string(raw), "-- +goose Down")[0]); err != nil {
 		t.Fatal(err)
 	}
-	rubric, err := s.activeRubric(ctx)
-	if err != nil {
+	var bands []struct {
+		Label string  `json:"label"`
+		Min   float64 `json:"min"`
+	}
+	if err := s.pool().QueryRow(ctx, `SELECT grade_bands FROM rubrics WHERE is_active`).Scan(&bands); err != nil {
 		t.Fatal(err)
 	}
-	if len(rubric.Bands) != 5 {
-		t.Fatalf("bands=%+v", rubric.Bands)
+	expected := map[string]float64{"优秀": 90, "良好": 80, "中等": 70, "及格": 60, "需加油": 0}
+	if len(bands) != len(expected) {
+		t.Fatalf("bands=%+v", bands)
 	}
-	for _, tc := range []struct {
-		total float64
-		want  string
-	}{{0, "需加油"}, {50, "需加油"}, {59.9, "需加油"}, {60, "及格"}, {69.9, "及格"}, {70, "中等"}, {79.9, "中等"}, {80, "良好"}, {89.9, "良好"}, {90, "优秀"}, {100, "优秀"}} {
-		if got := rubric.Grade(tc.total); got != tc.want {
-			t.Errorf("grade(%v)=%q want %q", tc.total, got, tc.want)
+	for _, band := range bands {
+		if min, ok := expected[band.Label]; !ok || band.Min != min {
+			t.Errorf("unexpected legacy grade band %+v", band)
 		}
-	}
-	total, grade := rubric.Total(map[string]int{"white": 10, "black": 10, "variation": 10, "structure": 15, "control": 5})
-	if total != 50 || grade != "需加油" {
-		t.Fatalf("reported example: total=%v grade=%s", total, grade)
 	}
 }

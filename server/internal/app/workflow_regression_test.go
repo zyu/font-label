@@ -29,6 +29,11 @@ import (
 // settings are modified, including when TEST_DATABASE_URL points at the dev DB.
 func regressionServer(t *testing.T) (*Server, *gin.Engine, string) {
 	t.Helper()
+	return regressionServerBefore(t, "")
+}
+
+func regressionServerBefore(t *testing.T, migration string) (*Server, *gin.Engine, string) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("set TEST_DATABASE_URL to run workflow integration tests")
@@ -66,6 +71,9 @@ func regressionServer(t *testing.T) (*Server, *gin.Engine, string) {
 		t.Fatal(err)
 	}
 	for _, file := range files {
+		if file.Name() == migration {
+			break
+		}
 		raw, err := dbmigrations.FS.ReadFile(dbmigrations.Dir + "/" + file.Name())
 		if err != nil {
 			t.Fatal(err)
@@ -157,7 +165,7 @@ func TestWorkflowSubmitAndDraftDimComments(t *testing.T) {
 	for _, kind := range []string{"score", "exception"} {
 		t.Run(kind, func(t *testing.T) {
 			_, id := regressionImage(t, s, "assigned")
-			draft := map[string]any{"kind": "score", "scores": map[string]int{"white": 20, "black": 20, "variation": 15, "structure": 20, "control": 15}, "dim_comments": comments}
+			draft := map[string]any{"kind": "score", "grades": map[string]string{"white": "S", "black": "S", "variation": "A", "structure": "S", "control": "A"}, "dim_comments": comments}
 			w := regressionRequest(t, router, token, "PUT", fmt.Sprintf("/images/%d/draft", id), draft)
 			if w.Code != 200 {
 				t.Fatalf("save draft: %s", w.Body)
@@ -178,7 +186,7 @@ func TestWorkflowSubmitAndDraftDimComments(t *testing.T) {
 			}
 			payload := draft
 			if kind == "exception" {
-				payload = map[string]any{"kind": "exception", "exception_reasons": []string{"blur"}, "exception_note": "图片严重模糊"}
+				payload = map[string]any{"kind": "exception", "exception_reasons": []string{"blurry"}, "exception_note": "图片严重模糊"}
 			}
 			payload["client_submit_id"] = fmt.Sprintf("11111111-1111-4111-8111-%012d", id)
 			w = regressionRequest(t, router, token, "POST", fmt.Sprintf("/images/%d/submit", id), payload)
@@ -320,7 +328,7 @@ func TestWorkflowDimCommentSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := map[string]any{"name": "短评方案", "dims": rubric.Dims, "grade_bands": rubric.Bands, "dim_comment_min": 3, "dim_comment_max": 50}
+	body := map[string]any{"name": "短评方案", "dims": rubric.Dims, "dim_comment_min": 3, "dim_comment_max": 50}
 	w := regressionRequest(t, router, token, "POST", "/rubrics", body)
 	if w.Code != 200 {
 		t.Fatal(w.Body)
@@ -339,9 +347,9 @@ func TestWorkflowDimCommentSettings(t *testing.T) {
 	}
 	_, id := regressionImage(t, s, "assigned")
 	// The user's concrete example includes the concise structure comment 占格居中。
-	body = map[string]any{"kind": "score", "scores": map[string]int{"white": 20, "black": 20, "variation": 15, "structure": 20, "control": 15}, "dim_comments": map[string]string{"white": "撇捺左右空白大致匀。", "black": "撇高捺低，字形站得稳。", "variation": "捺略短，长短差可再拉开。", "structure": "占格居中。", "control": "撇有轻重，捺角可更明确。"}}
+	body = map[string]any{"kind": "score", "grades": map[string]string{"white": "S", "black": "S", "variation": "A", "structure": "S", "control": "A"}, "dim_comments": map[string]string{"white": "撇捺左右空白大致匀。", "black": "撇高捺低，字形站得稳。", "variation": "捺略短，长短差可再拉开。", "structure": "占格居中。", "control": "撇有轻重，捺角可更明确。"}}
 	w = regressionRequest(t, router, token, "POST", fmt.Sprintf("/images/%d/submit", id), body)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"total":90`) {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"comment_required":3`) {
 		t.Fatalf("configured short comments: %s", w.Body)
 	}
 }
@@ -449,8 +457,8 @@ func TestWorkflowExceptionRejectsScoresAndRequiresKnownType(t *testing.T) {
 	for _, fields := range []map[string]any{
 		{"kind": "exception"},
 		{"kind": "exception", "exception_reasons": []string{"unknown"}},
-		{"kind": "exception", "exception_reasons": []string{"blur"}, "scores": map[string]int{"white": 20}},
-		{"kind": "exception", "exception_reasons": []string{"blur"}, "dim_comments": map[string]string{"white": "示例评语"}},
+		{"kind": "exception", "exception_reasons": []string{"blurry"}, "scores": map[string]int{"white": 20}},
+		{"kind": "exception", "exception_reasons": []string{"blurry"}, "dim_comments": map[string]string{"white": "示例评语"}},
 	} {
 		res := regressionRequest(t, router, token, "POST", path, fields)
 		if res.Code != 422 {
@@ -458,7 +466,7 @@ func TestWorkflowExceptionRejectsScoresAndRequiresKnownType(t *testing.T) {
 		}
 	}
 	res := regressionRequest(t, router, token, "POST", path, map[string]any{
-		"kind": "exception", "exception_reasons": []string{"blur"},
+		"kind": "exception", "exception_reasons": []string{"blurry"},
 	})
 	if res.Code != 200 {
 		t.Fatalf("valid exception status %d: %s", res.Code, res.Body)

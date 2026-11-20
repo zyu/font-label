@@ -18,6 +18,7 @@ type APIError struct {
 	Code    string
 	Message string
 	Fields  map[string]string
+	Details any
 }
 
 func (e *APIError) Error() string { return e.Message }
@@ -55,6 +56,9 @@ func Fail(c *gin.Context, err error) {
 	body := gin.H{"code": ae.Code, "message": ae.Message}
 	if len(ae.Fields) > 0 {
 		body["fields"] = ae.Fields
+	}
+	if ae.Details != nil {
+		body["details"] = ae.Details
 	}
 	c.AbortWithStatusJSON(ae.Status, gin.H{"error": body, "request_id": RequestIDOf(c)})
 }

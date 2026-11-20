@@ -6,12 +6,9 @@ import (
 	"time"
 )
 
-func contextBackground() context.Context { return context.Background() }
-
 // StartWorker runs the background loops: lease expiry and async exports.
 func (s *Server) StartWorker(ctx context.Context) {
 	go s.loop(ctx, 60*time.Second, "requeue", s.requeueExpired)
-	go s.loop(ctx, 5*time.Second, "exports", s.runPendingExports)
 	if s.oss != nil {
 		go s.loop(ctx, 5*time.Second, "oss-exports", s.runPendingOSSExports)
 	}
@@ -49,41 +46,4 @@ func (s *Server) requeueExpired(ctx context.Context) error {
 		slog.Warn("requeued expired claims", "count", tag.RowsAffected())
 	}
 	return err
-}
-
-func (s *Server) runPendingExports(ctx context.Context) error {
-	rows, err := s.pool().Query(ctx,
-		`SELECT id, user_id, format, filters::text FROM export_jobs
-		  WHERE status='pending' AND destination='download' ORDER BY id LIMIT 3`)
-	if err != nil {
-		return err
-	}
-	type job struct {
-		id      int64
-		userID  int64
-		format  string
-		filters string
-	}
-	jobs := []job{}
-	for rows.Next() {
-		var j job
-		if err := rows.Scan(&j.id, &j.userID, &j.format, &j.filters); err != nil {
-			rows.Close()
-			return err
-		}
-		jobs = append(jobs, j)
-	}
-	rows.Close()
-
-	for _, j := range jobs {
-		if tag, err := s.pool().Exec(ctx,
-			`UPDATE export_jobs SET status='running' WHERE id=$1 AND status='pending'`, j.id); err != nil || tag.RowsAffected() == 0 {
-			continue
-		}
-		if err := s.runExportJob(j.id, j.userID, j.format, []byte(j.filters)); err != nil {
-			slog.Error("export job failed", "id", j.id, "err", err)
-			s.failExportJob(ctx, j.id, err)
-		}
-	}
-	return nil
 }

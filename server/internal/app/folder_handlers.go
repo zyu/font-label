@@ -26,20 +26,39 @@ SELECT f.id, f.name, f.note, f.created_at, COALESCE(u.display_name,''), (f.archi
        count(i.id) FILTER (WHERE i.status='excluded' AND NOT i.quality_pending)::int
   FROM folders f
   LEFT JOIN users u ON u.id = f.created_by
-  LEFT JOIN images i ON i.folder_id = f.id AND ` + workflowImageSQL
+  LEFT JOIN images i ON i.folder_id=f.id AND i.status<>'exception_locked' AND ` + workflowImageSQL
 
 func (s *Server) handleListFolders(c *gin.Context) {
-	includeArchived := c.Query("include_archived") == "1"
-	clause := " GROUP BY f.id, u.display_name ORDER BY f.id DESC"
-	if !includeArchived {
-		clause = " WHERE f.archived_at IS NULL" + clause
-	}
+	s.listFolders(c, c.Query("include_archived") == "1", c.Query("page") != "" || c.Query("page_size") != "")
+}
+
+func listPaging(c *gin.Context) (int, int) {
+	page, size := httpx.Paging(c)
+	return page, min(size, 20)
+}
+
+func (s *Server) listFolders(c *gin.Context, includeArchived, paginated bool) {
 	selectSQL := folderSelect
 	var args []any
 	me := auth.MustCurrent(c)
 	if me.Role == "reviewer" {
 		selectSQL += " AND NOT i.quality_pending AND " + reviewScope("$1", "$2")
 		args = append(args, me.Role, me.ID)
+	}
+	filter := ""
+	if !includeArchived {
+		filter = " WHERE f.archived_at IS NULL"
+	}
+	clause := filter + " GROUP BY f.id,u.display_name ORDER BY f.id DESC"
+	page, size := listPaging(c)
+	var total int
+	if paginated {
+		if err := s.pool().QueryRow(c.Request.Context(), "SELECT count(*) FROM folders f"+filter).Scan(&total); err != nil {
+			httpx.Fail(c, err)
+			return
+		}
+		args = append(args, size, (page-1)*size)
+		clause += " LIMIT $" + itoa(len(args)-1) + " OFFSET $" + itoa(len(args))
 	}
 	rows, err := s.pool().Query(c.Request.Context(), selectSQL+clause, args...)
 	if err != nil {
@@ -52,7 +71,10 @@ func (s *Server) handleListFolders(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	httpx.OK(c, gin.H{"items": items})
+	if !paginated {
+		total = len(items)
+	}
+	httpx.OK(c, gin.H{"items": items, "total": total, "page": page, "page_size": size})
 }
 
 // handleClaimableFolders lists folders with remaining unassigned images.
@@ -178,7 +200,7 @@ func (s *Server) handleUpdateFolder(c *gin.Context) {
 			var incomplete bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (
 				SELECT 1 FROM images i WHERE folder_id=$1 AND
-				(quality_pending OR (status NOT IN ('approved','excluded') AND `+workflowImageSQL+`))
+				`+unfinishedTaskSQL+` AND `+workflowImageSQL+`
 			)`, id).Scan(&incomplete); err != nil {
 				return err
 			}

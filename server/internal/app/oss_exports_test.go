@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,8 +31,8 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 	ctx := context.Background()
 	folder, image := regressionImage(t, s, "approved")
 	_, excluded := regressionImage(t, s, "approved")
-	if _, err := s.pool().Exec(ctx, `INSERT INTO annotations(image_id,annotator_id,kind,scores,total)
-		VALUES($1,1,'score','{"white":20}',100),($2,1,'score','{"white":15}',75)`, image, excluded); err != nil {
+	if _, err := s.pool().Exec(ctx, `INSERT INTO annotations(image_id,annotator_id,kind,grades)
+		VALUES($1,1,'score','{"white":"S","black":"A","variation":"B","structure":"C","control":"D"}'),($2,1,'score','{"white":"A"}')`, image, excluded); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.store.Write("test.png", []byte("source image")); err != nil {
@@ -65,15 +66,28 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 		}
 		defer f.Close()
 		var records []struct {
-			TaskID int64          `json:"task_id"`
-			Path   string         `json:"image_path"`
-			Scores map[string]int `json:"scores"`
+			TaskID int64             `json:"task_id"`
+			Path   string            `json:"image_path"`
+			Grades map[string]string `json:"grades"`
 		}
 		if err := json.NewDecoder(f).Decode(&records); err != nil {
 			return err
 		}
-		if len(records) != 1 || records[0].TaskID != image || records[0].Scores["white"] != 20 {
+		if len(records) != 1 || records[0].TaskID != image || records[0].Grades["white"] != "S" {
 			return fmt.Errorf("unexpected annotations: %+v", records)
+		}
+		training, err := z.Open("data.jsonl")
+		if err != nil {
+			return err
+		}
+		defer training.Close()
+		var sample trainRecord
+		if err := json.NewDecoder(training).Decode(&sample); err != nil {
+			return err
+		}
+		if len(sample.Images) != 1 || sample.Images[0] != records[0].Path || len(sample.Messages) != 2 ||
+			!strings.Contains(sample.Messages[1].Content, "控笔：D") || strings.Contains(sample.Messages[1].Content, "总分") {
+			return fmt.Errorf("unexpected training record: %+v", sample)
 		}
 		img, err := z.Open(records[0].Path)
 		if err != nil {
@@ -90,12 +104,6 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("enqueue: %d %s", res.Code, res.Body)
 	}
-	if err := s.runPendingExports(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if uploadedFile != "" {
-		t.Fatal("local worker picked up an OSS job")
-	}
 
 	// A formerly running job is recovered after the worker loses its lock.
 	if _, err := s.pool().Exec(ctx, `UPDATE export_jobs SET status='running' WHERE destination='oss'`); err != nil {
@@ -106,6 +114,24 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 	}
 	if _, err := os.Stat(uploadedFile); !os.IsNotExist(err) {
 		t.Fatalf("temporary ZIP was retained: %v", err)
+	}
+	var packageBytes bytes.Buffer
+	count, err := s.writeOSSArchive(ctx, &packageBytes, exportFilters{Status: "all"})
+	if err != nil || count != 2 {
+		t.Fatalf("archive with reused original has %d records: %v", count, err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(packageBytes.Bytes()), int64(packageBytes.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageCount := 0
+	for _, entry := range reader.File {
+		if strings.HasPrefix(entry.Name, "images/") {
+			imageCount++
+		}
+	}
+	if imageCount != count {
+		t.Fatalf("archive has %d image entries for %d rows", imageCount, count)
 	}
 	res = regressionRequest(t, router, admin, "GET", "/exports", nil)
 	for _, fragment := range []string{`"oss_enabled":true`, `"destination":"oss"`, `"status":"done"`, `"object_url":"https://fixture.oss-cn-chengdu.aliyuncs.com/font-label/exports/test.zip"`} {

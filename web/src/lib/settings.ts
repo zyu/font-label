@@ -16,3 +16,17 @@ export function exceptionReasons(value: unknown): { key: string; label: string }
     return true;
   });
 }
+
+const historicalExceptionLabels: Record<string, string> = {
+  blur: "严重失焦，笔画糊成一团",
+  tilt: "图片倾斜",
+  exposure: "曝光异常",
+  privacy: "含未打码信息",
+  occluded: "文字被遮挡",
+  empty: "无有效书写内容或重复图片",
+};
+
+export function exceptionReasonLabel(key: string, reasons: unknown): string {
+  return exceptionReasons(reasons).find((reason) => reason.key === key)?.label
+    ?? (Object.hasOwn(historicalExceptionLabels, key) ? historicalExceptionLabels[key] : key);
+}

@@ -267,13 +267,15 @@ func (s *Server) handleUserStats(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	var avg float64
-	_ = s.pool().QueryRow(c.Request.Context(),
-		`SELECT COALESCE(avg(total),0) FROM annotations WHERE annotator_id=$1 AND kind='score'`, id).Scan(&avg)
+	distribution, err := s.gradeDistribution(c.Request.Context(), id, 0)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
 	httpx.OK(c, gin.H{
 		"claims": claims, "granted": granted, "submitted": submitted,
 		"approved": approved, "rejected": rejected, "assigned": assigned,
-		"avg_total": avg,
+		"grade_distribution": distribution,
 	})
 }
 
@@ -312,23 +314,22 @@ func validateUserWorkflowChange(ctx context.Context, tx pgx.Tx, id int64, oldRol
 	var busy bool
 	switch oldRole {
 	case "annotator":
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM images WHERE group_id IS NOT NULL AND annotator_id=$1
-			AND (quality_pending OR status NOT IN ('approved','excluded')))`, id).Scan(&busy); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM images i WHERE i.group_id IS NOT NULL AND i.annotator_id=$1
+			AND `+unfinishedTaskSQL+`)`, id).Scan(&busy); err != nil {
 			return err
 		}
 	case "reviewer":
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM annotation_group_members gm WHERE gm.user_id=$1
-			AND EXISTS (SELECT 1 FROM images WHERE group_id=gm.group_id AND
-			    (quality_pending OR status NOT IN ('approved','excluded')))
+			AND EXISTS (SELECT 1 FROM images i WHERE i.group_id=gm.group_id AND `+unfinishedTaskSQL+`)
 			AND NOT EXISTS (SELECT 1 FROM annotation_group_members other JOIN users u ON u.id=other.user_id
 			    WHERE other.group_id=gm.group_id AND u.id<>$1 AND u.role='reviewer' AND u.status='active')
 		)`, id).Scan(&busy); err != nil {
 			return err
 		}
 	case "quality":
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM quality_samples WHERE inspector_id=$1 AND result IS NULL)
-			OR EXISTS (SELECT 1 FROM quality_disputes WHERE arbiter_id=$1 AND result IS NULL)`, id).Scan(&busy); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 `+qualityFrom+`
+			WHERE (q.inspector_id=$1 AND q.result IS NULL) OR (d.arbiter_id=$1 AND d.result IS NULL))`, id).Scan(&busy); err != nil {
 			return err
 		}
 	}

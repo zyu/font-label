@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Descriptions, Empty, Input, InputNumber, Modal, Space, Spin, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Descriptions, Empty, Input, Select, Modal, Space, Spin, Tag, Typography, message } from "antd";
 import { CheckOutlined, CloseOutlined, ArrowLeftOutlined, ArrowRightOutlined } from "@ant-design/icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import type { ImageDTO, ImageDetail, Page } from "../api/types";
-import { exceptionReasons, stringSetting } from "../lib/settings";
+import { exceptionReasonLabel, stringSetting } from "../lib/settings";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
-import { computeTotal } from "../components/ScorePanel";
+import { LEVELS, type Level } from "../lib/annotationLevels";
 
 export default function ReviewPage() {
   const { imageId } = useParams();
@@ -24,8 +24,7 @@ export default function ReviewPage() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [comment, setComment] = useState("");
   const [tags, setTags] = useState<string[]>([]);
-  // 审核改分：以原分数为起点，只把改动过的维度作为 score_patch 提交
-  const [patched, setPatched] = useState<Record<string, number>>({});
+  const [patched, setPatched] = useState<Record<string, Level>>({});
 
   const detail = useQuery({
     queryKey: ["image", id],
@@ -65,31 +64,30 @@ export default function ReviewPage() {
     setTags([]);
   }, [id]);
 
-  // 改分草稿：切图时用该图原有分数重置
+  // 切图时恢复该图的原始等级。
   useEffect(() => {
     if (!image) return;
-    setPatched({ ...(image.scores ?? {}) });
+    setPatched({ ...(image.grades ?? {}) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [image?.id]);
 
-  const mergedScores = useMemo(
-    () => ({ ...(image?.scores ?? {}), ...patched }),
-    [image?.scores, patched],
+  const mergedGrades = useMemo(
+    () => ({ ...(image?.grades ?? {}), ...patched }),
+    [image?.grades, patched],
   );
 
-  // 只提交真正改过的维度，未改的维度保持原值
-  const changedScorePatch = useMemo(() => {
-    const out: Record<string, number> = {};
+  // 仅提交变化的维度。
+  const changedGradePatch = useMemo(() => {
+    const out: Record<string, Level> = {};
     if (image?.kind !== "score") return out;
     for (const d of dims) {
-      const cur = mergedScores[d.key];
-      if (cur !== undefined && cur !== image.scores?.[d.key]) out[d.key] = cur;
+      const cur = mergedGrades[d.key];
+      if (cur !== undefined && cur !== image.grades?.[d.key]) out[d.key] = cur;
     }
     return out;
-  }, [dims, mergedScores, image]);
+  }, [dims, mergedGrades, image]);
 
-  const changedCount = Object.keys(changedScorePatch).length;
-  const newTotal = image && image.kind === "score" ? computeTotal(dims, mergedScores) : null;
+  const changedCount = Object.keys(changedGradePatch).length;
 
   if (detail.isLoading) {
     return (
@@ -137,19 +135,12 @@ export default function ReviewPage() {
             column={2}
             title="标注内容"
             items={[
-              { key: "kind", label: "类型", children: <Tag color="blue">评分</Tag> },
-              {
-                key: "total",
-                label: "总分",
-                children: image.total === null ? "-" : <b>{image.total} {image.grade}</b>,
-              },
               ...dims.map((d) => ({
                 key: d.key,
                 label: d.label,
                 children: (
                   <div>
-                    <b>{image.scores?.[d.key] ?? "-"}</b>
-                    <span style={{ marginLeft: 6, color: "#7b8598" }}>/{d.max || 20}</span>
+                    <b>{image.grades?.[d.key] ?? "-"}</b>
                     <div style={{ fontSize: 12, color: image.dim_comments?.[d.key] ? "#44506a" : "#bbb", marginTop: 2, whiteSpace: "pre-wrap" }}>
                       {image.dim_comments?.[d.key] || "（该维未写点评）"}
                     </div>
@@ -162,19 +153,14 @@ export default function ReviewPage() {
           {image.kind === "score" && (
             <Card
               size="small"
-              title="审核改分（可选）"
+              title="等级修正（可选）"
               style={{ margin: "12px 0" }}
-              extra={
-                <span style={{ fontSize: 12, color: changedCount > 0 ? "#cf1322" : "#7b8598" }}>
-                  原总分 {image.total ?? "-"} → 改后 {newTotal ?? "-"}
-                  {changedCount > 0 ? `（改了 ${changedCount} 维）` : ""}
-                </span>
-              }
+              extra={changedCount > 0 ? `修正 ${changedCount} 维` : undefined}
             >
               <Space direction="vertical" style={{ width: "100%" }} size={6}>
                 {dims.map((d) => {
-                  const cur = mergedScores[d.key];
-                  const orig = image.scores?.[d.key];
+                  const cur = mergedGrades[d.key];
+                  const orig = image.grades?.[d.key];
                   const changed = cur !== undefined && cur !== orig;
                   return (
                     <div
@@ -183,27 +169,24 @@ export default function ReviewPage() {
                       style={{ display: "flex", alignItems: "center", gap: 8 }}
                     >
                       <span style={{ width: 92, fontSize: 13 }}>{d.label}</span>
-                      <InputNumber
+                      <Select<Level>
                         size="small"
-                        min={0}
-                        max={d.max || 20}
-                        step={d.step && d.step > 1 ? d.step : 5}
-                        value={cur ?? null}
+                        value={cur}
+                        options={LEVELS.map((value) => ({ label: value, value }))}
                         disabled={image.status !== "submitted"}
                         onChange={(v) =>
-                          setPatched((p) => ({ ...p, [d.key]: typeof v === "number" ? v : 0 }))
+                          setPatched((p) => ({ ...p, [d.key]: v }))
                         }
-                        data-test={`review-score-${d.key}`}
+                        data-test={`review-grade-${d.key}`}
                         style={{ width: 66 }}
                       />
-                      <span style={{ fontSize: 12, color: "#7b8598" }}>/{d.max || 20}</span>
                       {changed && <Tag color="orange">原 {orig ?? "—"}</Tag>}
                     </div>
                   );
                 })}
               </Space>
               <div style={{ fontSize: 12, color: "#7b8598", marginTop: 6 }}>
-                改分后按五维重算总分，点「通过」时一并保存；不填则保持原分数
+                点击「通过」保存修正后的维度等级。
               </div>
             </Card>
           )}
@@ -218,7 +201,7 @@ export default function ReviewPage() {
                 <Space direction="vertical" size={2}>
                   {(image.exception_reasons ?? []).map((r) => (
                     <span key={r}>
-                      · {exceptionReasons(me?.exception_reasons).find((x) => x.key === r)?.label ?? r}
+                      · {exceptionReasonLabel(r, me?.exception_reasons)}
                     </span>
                   ))}
                   {image.comment && <span>备注：{image.comment}</span>}
@@ -252,13 +235,13 @@ export default function ReviewPage() {
               onClick={() =>
                 review.mutate({
                   action: "approve",
-                  ...(changedCount > 0 ? { score_patch: changedScorePatch } : {}),
+                  ...(changedCount > 0 ? { grade_patch: changedGradePatch } : {}),
                   ...(comment.trim() ? { comment: comment.trim() } : {}),
                 })
               }
               data-test="approve"
             >
-              {isException ? "确认照片不合格" : "通过（评分合格）"}
+              {isException ? "确认照片不合格" : "通过（等级合格）"}
             </Button>
             <Button
               danger
@@ -314,7 +297,7 @@ export default function ReviewPage() {
           showCount
           value={comment}
           onChange={(e) => setComment(e.target.value)}
-          placeholder="指出具体问题，例如：撇画太短没送到左下角，参差分应更低"
+          placeholder="指出具体问题，例如：撇画太短没送到左下角，参差等级应更低"
           data-test="reject-comment"
         />
       </Modal>

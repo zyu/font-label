@@ -1,5 +1,6 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
-import { Alert, Card, Input, Space, Table, Typography } from "antd";
+import { Alert, Card, Input, Space, Typography } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api/client";
 import type { Page } from "../../api/types";
@@ -24,7 +25,7 @@ export default function AuditLogs() {
   const entries = useQuery({
     queryKey: ["audit-logs", page, before, action, actor],
     queryFn: () => api.get<Page<AuditEntry> & { before: number }>(
-      "/audit-logs?" + new URLSearchParams({ page: String(page), page_size: "30", before: String(before), action, actor }),
+      "/audit-logs?" + new URLSearchParams({ page: String(page), page_size: "20", before: String(before), action, actor }),
     ),
   });
   const reset = () => { setPage(1); setBefore(0); };
@@ -36,9 +37,9 @@ export default function AuditLogs() {
         <Input.Search allowClear placeholder="姓名或账号" onSearch={(value) => { setActor(value.trim()); reset(); }} />
       </Space>
       {entries.error && <Alert type="error" message={entries.error.message} />}
-      <Table<AuditEntry> rowKey="id" size="small" loading={entries.isFetching} dataSource={entries.data?.items ?? []}
+      <ListTable<AuditEntry> rowKey="id" size="small" loading={entries.isFetching} dataSource={entries.data?.items ?? []}
         pagination={{
-          current: page, pageSize: 30, total: entries.data?.total, showSizeChanger: false,
+          current: page, pageSize: 20, total: entries.data?.total, showSizeChanger: false,
           onChange: (value) => { setBefore(entries.data?.before ?? 0); setPage(value); },
         }}
         expandable={{ expandedRowRender: (row) => (

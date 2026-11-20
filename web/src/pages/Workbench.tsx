@@ -1,3 +1,5 @@
+import RatingSummary from "../components/RatingSummary";
+import ListTable from "../components/ListTable";
 import { useState } from "react";
 import {
   Alert,
@@ -11,7 +13,6 @@ import {
   Row,
   Segmented,
   Space,
-  Table,
   Tag,
   Typography,
   message,
@@ -20,7 +21,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { STATUS_COLOR, STATUS_LABEL, type ClaimResult, type FolderDTO, type ImageDTO, type Page } from "../api/types";
-import { exceptionReasons } from "../lib/settings";
+import { exceptionReasonLabel } from "../lib/settings";
 import { useAuth } from "../auth";
 
 const TABS = [
@@ -28,6 +29,7 @@ const TABS = [
   { label: "已驳回", value: "rejected" },
   { label: "待审核或质检", value: "submitted" },
   { label: "已通过", value: "approved" },
+  { label: "无需标注", value: "exception_locked" },
 ];
 
 export default function WorkbenchPage() {
@@ -55,11 +57,15 @@ export default function WorkbenchPage() {
 
   const tasks = useQuery({
     queryKey: ["my-tasks", tab, page],
+    refetchInterval: grouped ? 5000 : false,
+    refetchOnWindowFocus: grouped ? "always" : false,
     queryFn: () => api.get<Page<ImageDTO>>(`/claims/my?status=${tab}&page_size=20&page=${page}`),
   });
 
   const counts = useQuery({
     queryKey: ["my-counts"],
+    refetchInterval: grouped ? 5000 : false,
+    refetchOnWindowFocus: grouped ? "always" : false,
     queryFn: async () => {
       const [a, r, s] = await Promise.all([
         api.get<Page<ImageDTO>>("/claims/my?status=active&page_size=1"),
@@ -123,15 +129,8 @@ export default function WorkbenchPage() {
     { title: "文件夹", dataIndex: "folder" },
     ...(grouped ? [{ title: "分组", dataIndex: "group" }] : []),
     {
-      title: "分数",
-      width: 120,
-      render: (_: unknown, row: ImageDTO) =>
-        row.total === null ? <Tag>未评分</Tag> : (
-          <Space size={4}>
-            <b>{row.total}</b>
-            <Tag color={row.total >= 90 ? "green" : row.total >= 60 ? "blue" : "volcano"}>{row.grade}</Tag>
-          </Space>
-        ),
+      title: "五维等级",
+      render: (_: unknown, row: ImageDTO) => <RatingSummary dimensions={me?.rubric.dims ?? []} grades={row.grades} />,
     },
     {
       title: "状态",
@@ -147,12 +146,11 @@ export default function WorkbenchPage() {
     {
       title: "点评/异常",
       dataIndex: "comment",
-      ellipsis: true,
       render: (v: string, row: ImageDTO) =>
         row.kind === "exception" ? <Space size={4} wrap>
-          {(row.exception_reasons ?? []).map((reason) => <Tag key={reason} color="orange">{exceptionReasons(me?.exception_reasons).find((item) => item.key === reason)?.label ?? reason}</Tag>)}
+          {(row.exception_reasons ?? []).map((reason) => <Tag key={reason} color="orange">{exceptionReasonLabel(reason, me?.exception_reasons)}</Tag>)}
           {v && <span>{v}</span>}
-        </Space> : v || "-",
+        </Space> : <RatingSummary dimensions={me?.rubric.dims ?? []} comments={row.dim_comments ?? {}} />,
     },
     {
       title: "操作",
@@ -261,7 +259,7 @@ export default function WorkbenchPage() {
           <Segmented
             value={tab}
             onChange={(v) => setTab(v as string)}
-            options={TABS.map((t) => ({
+            options={TABS.filter((t) => grouped || t.value === tab || t.value !== "exception_locked").map((t) => ({
               ...t,
               label: (
                 <span>
@@ -274,7 +272,7 @@ export default function WorkbenchPage() {
           />
         }
       >
-        <Table
+        <ListTable
           rowKey="id"
           className="workbench-tasks"
           size="middle"

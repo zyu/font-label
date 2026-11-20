@@ -1,5 +1,3 @@
-import type { Dim } from "../api/types";
-
 export const LEVELS = ["S", "A", "B", "C", "D"] as const;
 export type Level = typeof LEVELS[number];
 
@@ -57,20 +55,6 @@ const legacyComments = [
   { dimension: "variation", grade: "B", text: "主笔不够放开，注意长短变化。" },
   { dimension: "control", grade: "A", text: "整体稳，留意右侧收笔不要出格。" },
 ];
-
-export function scoreForLevel(dim: Dim, level: Level): number {
-  const max = dim.max > 0 ? dim.max : 10;
-  const step = dim.step && dim.step > 1 ? dim.step : 1;
-  return Math.round((4 - LEVELS.indexOf(level)) * Math.floor(max / step) / 4) * step;
-}
-
-export function levelForScore(dim: Dim, score?: number): Level | undefined {
-  if (score == null || !Number.isFinite(score)) return undefined;
-  if (score === 0) return "D";
-  return LEVELS.reduce((best, level) =>
-    Math.abs(score - scoreForLevel(dim, level)) < Math.abs(score - scoreForLevel(dim, best)) ? level : best,
-  );
-}
 
 export function commentChoices(config: unknown, dimension: string, grade: Level): string[] {
   const options: string[] = [];

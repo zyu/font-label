@@ -63,9 +63,9 @@ export default function LoginPage() {
   return (
     <div className="login-wrap">
       <div className="login-hero">
-        <h1>硬笔书法作业评分标注平台</h1>
+        <h1>硬笔书法作业评级标注平台</h1>
         <p>
-          上传学生作业照片，按张或按文件夹领取任务，五维（白平衡 / 黑平衡 / 参差 / 结构 / 控笔，各 20 分）打分并写点评；
+          上传学生作业照片，在工作台查看管理员下发的任务，五维（白平衡 / 黑平衡 / 参差 / 结构 / 控笔，S/A/B/C/D）评级并写评语；
           审核员逐条复核，可批注打回；全程留痕、可统计、可导出。
         </p>
         <div className="quote">

@@ -7,6 +7,7 @@ import {
   Modal,
   Space,
   Spin,
+  Table,
   Tag,
   Tooltip,
   Typography,
@@ -30,10 +31,21 @@ import DimensionGradeCard from "../components/DimensionGradeCard";
 import ExceptionPanel from "../components/ExceptionPanel";
 import ExampleDrawer from "../components/ExampleDrawer";
 import { dimCommentStates } from "../lib/dimComments";
-import { LEVELS, levelForScore, scoreForLevel, type Level } from "../lib/annotationLevels";
-import { exceptionReasons } from "../lib/settings";
+import { LEVELS, type Level } from "../lib/annotationLevels";
+import { exceptionReasonLabel, exceptionReasons } from "../lib/settings";
 import { createSubmitId } from "../lib/submitId";
 import { STATUS_LABEL } from "../api/types";
+
+interface GradeDifference {
+  dimension: string;
+  label: string;
+  own_grade: Level;
+  peer_grade: Level;
+  gap: number;
+  own_comment: string;
+  peer_comment: string;
+  peer_group: string;
+}
 
 const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
@@ -59,7 +71,7 @@ function AnnotationEditor({ id }: { id: number }) {
   const rubric = me!.rubric;
   const reasons = exceptionReasons(me?.exception_reasons);
 
-  const [scores, setScores] = useState<Record<string, number>>({});
+  const [grades, setGrades] = useState<Record<string, Level>>({});
   // 五维各自的点评：{ white: "...", black: "..." }
   const [dimComments, setDimComments] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
@@ -67,6 +79,7 @@ function AnnotationEditor({ id }: { id: number }) {
   const [invalidDim, setInvalidDim] = useState<string>();
   const cardList = useRef<HTMLDivElement>(null);
   const [excOpen, setExcOpen] = useState(false);
+  const [differences, setDifferences] = useState<GradeDifference[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
   const [initialized, setInitialized] = useState<string | null>(null);
@@ -79,9 +92,13 @@ function AnnotationEditor({ id }: { id: number }) {
     queryKey: ["image", id],
     queryFn: () => api.get<ImageDetail>(`/images/${id}`),
     enabled: Number.isFinite(id) && id > 0,
+    refetchInterval: (query) => query.state.data?.image.group_id ? 3000 : false,
+    refetchOnWindowFocus: (query) => query.state.data?.image.group_id ? "always" : false,
   });
 
   const image = detail.data?.image;
+  const imageID = image?.id;
+  const exceptionLocked = image?.status === "exception_locked";
   const canEdit = !image?.quality_pending && (image?.status === "assigned" || image?.status === "rejected");
   const neighbors = useQuery({
     queryKey: ["task-neighbors", id],
@@ -111,18 +128,12 @@ function AnnotationEditor({ id }: { id: number }) {
   useEffect(() => {
     if (!image || initialized === `${image.id}:${image.status}`) return;
     const draft = canEdit ? detail.data?.draft : null;
-    const savedScores = draft?.scores ?? image.scores ?? {};
-    // Keep valid historical scores, normalizing only values outside the current rubric.
-    setScores(canEdit ? Object.fromEntries(rubric.dims.flatMap((dim) => {
-      const value = savedScores[dim.key];
-      const level = levelForScore(dim, value);
-      if (!level) return [];
-      const step = Math.max(1, dim.step || 1);
-      const max = dim.max > 0 ? dim.max : 10;
-      return [[dim.key, value >= 0 && value <= max && value % step === 0 ? value : scoreForLevel(dim, level)]];
-    })) : savedScores);
+    const savedGrades = draft?.grades ?? image.grades ?? {};
+    setGrades(savedGrades);
     setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
+    setDifferences([]);
+    if (!canEdit) setExcOpen(false);
     setInitialized(`${image.id}:${image.status}`);
     startedAt.current = Date.now();
   }, [image, detail.data?.draft, initialized, rubric.dims, canEdit]);
@@ -130,8 +141,8 @@ function AnnotationEditor({ id }: { id: number }) {
   const dimMin = rubric.dim_comment_min || 10;
   const dimMax = rubric.dim_comment_max || 50;
   const commentStates = dimCommentStates(rubric.dims, dimComments, dimMin, dimMax);
-  const firstInvalid = commentStates.find((comment, index) =>
-    !levelForScore(rubric.dims[index], scores[comment.key]) || !comment.ok,
+  const firstInvalid = commentStates.find((comment) =>
+    !grades[comment.key] || !comment.ok,
   );
 
   function findCard(key: string) {
@@ -142,9 +153,7 @@ function AnnotationEditor({ id }: { id: number }) {
   function pickGrade(key: string, level: Level) {
     const dim = rubric.dims.find((d) => d.key === key);
     if (!dim || !canEdit || excOpen || submitting.current) return false;
-    const value = scoreForLevel(dim, level);
-    if (levelForScore(dim, value) !== level) return false;
-    setScores((previous) => ({ ...previous, [key]: value }));
+    setGrades((previous) => ({ ...previous, [key]: level }));
     setActiveDim(key);
     setInvalidDim((previous) => previous === key ? undefined : previous);
     setDirty(true);
@@ -168,14 +177,17 @@ function AnnotationEditor({ id }: { id: number }) {
   );
 
   useEffect(() => {
-    if (!canEdit || !dirty || !image || submitting.current) return;
+    if (!canEdit || !dirty || !imageID || submitting.current) return;
     draftTimer.current = setTimeout(() => {
-      saveDraft({ kind: "score", scores, dim_comments: dimComments }).catch((e) => {
+      saveDraft({ kind: "score", grades, dim_comments: dimComments }).catch((e) => {
+        if (e instanceof ApiError && e.code === "EXCEPTION_LOCKED") {
+          void qc.invalidateQueries({ queryKey: ["image", id] });
+        }
         message.error(e instanceof ApiError ? e.message : "草稿保存失败，请重试");
       });
     }, 1000);
     return () => clearTimeout(draftTimer.current);
-  }, [dirty, scores, dimComments, image, saveDraft, canEdit]);
+  }, [dirty, grades, dimComments, imageID, saveDraft, canEdit, qc, id]);
 
   const submit = useMutation({
     mutationFn: async (payload: Record<string, unknown>) => {
@@ -219,7 +231,21 @@ function AnnotationEditor({ id }: { id: number }) {
         nav(returnTo);
       }
     },
-    onError: (e) => message.error(e instanceof Error ? e.message : "提交失败，请重试"),
+    onError: (e) => {
+      if (e instanceof ApiError && e.code === "GRADE_MISMATCH") {
+        const details = e.details as { differences?: GradeDifference[] } | undefined;
+        if (details?.differences?.length) {
+          setDifferences(details.differences);
+          return;
+        }
+      }
+      if (e instanceof ApiError && e.code === "EXCEPTION_LOCKED") {
+        void qc.invalidateQueries({ queryKey: ["image", id] });
+        void qc.invalidateQueries({ queryKey: ["my-tasks"] });
+        void qc.invalidateQueries({ queryKey: ["my-counts"] });
+      }
+      message.error(e instanceof Error ? e.message : "提交失败，请重试");
+    },
     onSettled: () => { submitting.current = false; },
   });
 
@@ -230,10 +256,10 @@ function AnnotationEditor({ id }: { id: number }) {
   }
 
   function doSubmit() {
-    if (!canEdit || excOpen || submitting.current) return;
+    if (!canEdit || excOpen || differences.length > 0 || submitting.current) return;
     if (firstInvalid) {
       const key = firstInvalid.key;
-      const commentEnabled = scores[key] !== undefined;
+      const commentEnabled = grades[key] !== undefined;
       setActiveDim(key);
       setInvalidDim(key);
       const card = findCard(key);
@@ -245,7 +271,7 @@ function AnnotationEditor({ id }: { id: number }) {
     }
     send({
       kind: "score",
-      scores,
+      grades,
       dim_comments: dimComments,
       duration_ms: Date.now() - startedAt.current,
     });
@@ -271,7 +297,7 @@ function AnnotationEditor({ id }: { id: number }) {
         onOk: (close) => {
           clearTimeout(draftTimer.current);
           confirm.update({ okButtonProps: { loading: true }, cancelButtonProps: { disabled: true } });
-          saveDraft({ kind: "score", scores, dim_comments: dimComments }).then(() => {
+          saveDraft({ kind: "score", grades, dim_comments: dimComments }).then(() => {
             close();
             nav(path, { state: location.state });
           }).catch((e) => {
@@ -286,7 +312,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen) return;
+      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen || differences.length > 0) return;
       const el = e.target as HTMLElement;
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -329,7 +355,8 @@ function AnnotationEditor({ id }: { id: number }) {
     return <Empty description="图片不存在或已被回收" />;
   }
 
-  const lastReject: Review | undefined = detail.data?.reviews.find((r) => r.action === "reject");
+  const reviews = detail.data?.reviews ?? [];
+  const lastReject: Review | undefined = reviews.find((r) => r.action === "reject");
 
   return (
     <div className="annotate-shell">
@@ -369,19 +396,35 @@ function AnnotationEditor({ id }: { id: number }) {
             <div className="annotation-status-text">
               <strong>{canEdit
                 ? `${image.status === "rejected" ? "已打回" : "待标注"} · 可编辑`
+                : exceptionLocked ? "对组异常已确认 · 无需标注"
                 : `${image.quality_pending ? "待质检或仲裁" : STATUS_LABEL[image.status] || image.status} · 只读`}</strong>
               {canEdit && <span>提交后只读，审核退回后可修改。</span>}
             </div>
           } />
           {image.kind === "exception" && (
-            <Alert type="warning" showIcon title="照片不合格原因" style={{ marginBottom: 12 }} description={
-              <Space direction="vertical" size={4}>
-                {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{reasons.find((item) => item.key === reason)?.label ?? reason}</span>)}
+            <Alert type="warning" showIcon title={exceptionLocked ? "对组判定的异常" : "照片不合格原因"} style={{ marginBottom: 12 }} description={
+              <Space orientation="vertical" size={4}>
+                {(image.exception_reasons ?? []).map((reason) => <span key={reason}>{exceptionReasonLabel(reason, reasons)}</span>)}
                 {image.comment && <span>备注：{image.comment}</span>}
               </Space>
             } />
           )}
-          {lastReject && (
+          {exceptionLocked && reviews.map((review) => (
+            <Alert
+              key={review.id}
+              type={review.action === "approve" ? "success" : "warning"}
+              style={{ marginBottom: 12 }}
+              title={`${review.source === "arbitration" ? "仲裁" : "审核"}${review.action === "approve" ? "通过" : "退回"} · ${review.reviewer}`}
+              description={
+                <Space orientation="vertical" size={4}>
+                  <span>{new Date(review.created_at).toLocaleString("zh-CN")}</span>
+                  {review.comment && <span>{review.comment}</span>}
+                  {review.reason_tags?.length > 0 && <span>{review.reason_tags.join("、")}</span>}
+                </Space>
+              }
+            />
+          ))}
+          {!exceptionLocked && lastReject && (
             <div className="reject-card">
               <div className="who">
                 {lastReject.source === "arbitration" ? "仲裁批注" : "审核批注"} · {lastReject.reviewer} ·{" "}
@@ -400,6 +443,7 @@ function AnnotationEditor({ id }: { id: number }) {
             </div>
           )}
 
+          {!exceptionLocked && <>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 10 }}>
             <Tag className="annotate-folder" color="blue">{image.folder}</Tag>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -418,13 +462,13 @@ function AnnotationEditor({ id }: { id: number }) {
               style={{ marginBottom: 12 }}
               description={
                 <>
-                  <div>打分前先检查照片。倾斜超过 15°、笔画因模糊或曝光异常看不清、文字被遮挡、含未打码的学生信息、无有效书写内容或重复上传，都是常见的不合格情况。</div>
-                  <div>如果照片清楚，只是字写得不好，请按评分标准打分。</div>
+                  <div>定级前检查是否有错字、无法辨认、空白、多字、非书写内容，或图片模糊到看不清笔画。</div>
+                  <div>拍摄角度、光线和遮挡以能否看清笔画为准。能辨认的单字按五维定级。</div>
                   <details className="photo-quality-example">
                     <summary>查看不合格照片示例</summary>
                     <figure className="guide-fig">
                       <img src="/examples/invalid.png" alt="不合格照片示例" loading="lazy" />
-                      <figcaption className="cap">这张照片倾斜、失焦，左侧过曝，右上角有未打码的学生信息，且手指挡住了字。</figcaption>
+                      <figcaption className="cap">这张照片因失焦和遮挡而看不清笔画。</figcaption>
                     </figure>
                   </details>
                 </>
@@ -434,7 +478,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
           <div className="dimension-card-list" ref={cardList} aria-disabled={excOpen || submit.isPending}>
             {rubric.dims.map((dim, index) => (
-              <DimensionGradeCard key={dim.key} dim={dim} score={scores[dim.key]}
+              <DimensionGradeCard key={dim.key} dim={dim} grade={grades[dim.key]}
                 comment={commentStates[index]} templates={me?.comment_templates} minLength={dimMin} maxLength={dimMax}
                 editable={canEdit} frozen={excOpen || submit.isPending}
                 active={canEdit && activeDim === dim.key} invalid={invalidDim === dim.key}
@@ -447,10 +491,11 @@ function AnnotationEditor({ id }: { id: number }) {
               />
             ))}
           </div>
+          </>}
 
           </div>
 
-          <div className="panel-footer">
+          {!exceptionLocked && <div className="panel-footer">
             <Tooltip title="提交并进入下一张（⌘/Ctrl + Enter）">
               <span style={{ flex: 1, display: "inline-flex" }}>
                 <Button
@@ -480,7 +525,7 @@ function AnnotationEditor({ id }: { id: number }) {
                 异常输入
               </Button>
             </Tooltip>
-          </div>
+          </div>}
         </div>
       </div>
 
@@ -499,6 +544,32 @@ function AnnotationEditor({ id }: { id: number }) {
       />
 
       <ExampleDrawer open={exampleOpen} onClose={() => setExampleOpen(false)} />
+
+      <Modal
+        open={canEdit && differences.length > 0}
+        title="组间等级差异"
+        width={760}
+        onCancel={() => setDifferences([])}
+        footer={<Button type="primary" onClick={() => setDifferences([])}>返回修改</Button>}
+      >
+        <Table<GradeDifference>
+          size="small"
+          pagination={false}
+          rowKey={(row) => `${row.peer_group}:${row.dimension}`}
+          dataSource={differences}
+          scroll={{ x: 520 }}
+          columns={[
+            { title: "维度", dataIndex: "label", width: 130 },
+            { title: "我的等级和评语", render: (_, row) => <><Tag>{row.own_grade}</Tag>{row.own_comment || "—"}</> },
+            { title: "对方的等级和评语", render: (_, row) => (
+              <><Tag>{row.peer_grade}</Tag>{row.peer_comment || "—"}
+                {row.peer_group && <div><Typography.Text type="secondary">{row.peer_group}</Typography.Text></div>}
+              </>
+            ) },
+            { title: "档差", width: 100, render: (_, row) => `相差 ${row.gap} 档` },
+          ]}
+        />
+      </Modal>
 
       <Modal open={helpOpen} footer={null} onCancel={() => setHelpOpen(false)} title="快捷键">
         {SHORTCUTS.map(([k, v]) => (

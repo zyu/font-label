@@ -91,7 +91,6 @@ func (s *Server) Router() *gin.Engine {
 	quality.GET("/disputes", s.handleListDisputes)
 	quality.POST("/samples/:id", auth.Require("quality"), s.handleCheckSample)
 	quality.POST("/disputes/:id", auth.Require("quality"), s.handleResolveDispute)
-	admin.POST("/exports", s.handleCreateExport)
 	admin.POST("/exports/oss", s.handleCreateOSSExport)
 
 	// folders (admin + reviewer read; admin writes)
@@ -133,9 +132,8 @@ func (s *Server) Router() *gin.Engine {
 	authed.GET("/stats/timeseries", auth.Require("admin", "reviewer"), s.handleStatsTimeseries)
 	authed.GET("/stats/me", s.handleStatsMe)
 
-	// exports (download by owner or admin)
+	// OSS export jobs
 	authed.GET("/exports", s.handleListExports)
-	authed.GET("/exports/:id/download", s.handleDownloadExport)
 
 	return r
 }

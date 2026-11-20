@@ -16,6 +16,8 @@ import (
 const groupModeSQL = `EXISTS (SELECT 1 FROM annotation_groups)`
 const undispatchedSQL = `NOT EXISTS (SELECT 1 FROM images task WHERE task.source_image_id=i.id)`
 const workflowImageSQL = `(i.status <> 'unassigned' OR ` + undispatchedSQL + `)`
+const unfinishedTaskSQL = `(i.quality_pending OR i.status NOT IN ('approved','excluded','exception_locked')
+	OR EXISTS (SELECT 1 FROM images confirmed WHERE confirmed.id=i.exception_lock_id AND confirmed.quality_pending))`
 
 // Group tasks can only be reviewed by a reviewer who currently belongs to
 // their group. Admins can finish the pre-group workflow.
@@ -103,10 +105,8 @@ func (s *Server) handleSaveGroup(c *gin.Context) {
 			SELECT EXISTS (SELECT 1 FROM unnest($2::bigint[]) member(id)
 			     LEFT JOIN users u ON u.id=member.id
 			     WHERE u.id IS NULL OR u.role NOT IN ('annotator','reviewer')),
-			       EXISTS (SELECT 1 FROM images WHERE group_id=$1
-			           AND (quality_pending OR status NOT IN ('approved','excluded'))),
-			       EXISTS (SELECT 1 FROM images WHERE group_id=$1
-			           AND (quality_pending OR status NOT IN ('approved','excluded'))
+			       EXISTS (SELECT 1 FROM images i WHERE i.group_id=$1 AND `+unfinishedTaskSQL+`),
+			       EXISTS (SELECT 1 FROM images i WHERE i.group_id=$1 AND `+unfinishedTaskSQL+`
 			           AND NOT (annotator_id=ANY($2)))`, id, input.MemberIDs).
 			Scan(&invalid, &unfinished, &orphaned); err != nil {
 			return err
@@ -240,7 +240,8 @@ func (s *Server) handleDispatchGroups(c *gin.Context) {
 				return err
 			}
 		}
-		return nil
+		_, err = tx.Exec(ctx, `SELECT sync_group_exception_locks($1)`, ids)
+		return err
 	})
 	if err != nil {
 		httpx.Fail(c, err)

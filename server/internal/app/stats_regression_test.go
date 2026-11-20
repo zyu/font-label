@@ -48,9 +48,9 @@ func statsSubmit(t *testing.T, router *gin.Engine, token string, id int64, kind 
 	t.Helper()
 	body := map[string]any{"kind": kind}
 	if kind == "exception" {
-		body["exception_reasons"] = []string{"blur"}
+		body["exception_reasons"] = []string{"blurry"}
 	} else {
-		body["scores"] = map[string]int{"white": 20, "black": 20, "variation": 15, "structure": 20, "control": 15}
+		body["grades"] = map[string]string{"white": "S", "black": "S", "variation": "A", "structure": "S", "control": "A"}
 		body["dim_comments"] = map[string]string{"white": "撇捺左右空白大致匀，间距一致。", "black": "撇高捺低，字形站得稳，重心稳定。", "variation": "捺略短，长短差可以再拉开。", "structure": "占格居中，左右结构安排合理。", "control": "撇有轻重，捺角可以更明确。"}
 	}
 	w := regressionRequest(t, router, token, "POST", fmt.Sprintf("/images/%d/submit", id), body)

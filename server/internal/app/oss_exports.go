@@ -17,6 +17,7 @@ import (
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
+	"github.com/shangyue/font-label/server/internal/platform/score"
 )
 
 type ossExportUploader interface {
@@ -45,7 +46,7 @@ func (s *Server) handleCreateOSSExport(c *gin.Context) {
 	clause, args := input.Filters.ossWhere()
 	var eligible bool
 	err := s.pool().QueryRow(ctx, `SELECT EXISTS (
-		SELECT 1 FROM images i JOIN annotations a ON a.image_id=i.id WHERE `+clause+`
+		SELECT 1 FROM images i JOIN annotations a ON a.image_id=i.id AND a.version>i.voided_through_version WHERE `+clause+`
 	)`, args...).Scan(&eligible)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -228,8 +229,28 @@ func (s *Server) writeOSSArchive(ctx context.Context, w io.Writer, f exportFilte
 	if err != nil {
 		return 0, err
 	}
-	images, count, err := s.writeOSSManifest(ctx, manifest, f)
+	rubric, err := s.activeRubric(ctx)
 	if err != nil {
+		return 0, err
+	}
+	training, err := os.CreateTemp("", "font-label-training-*.jsonl")
+	if err != nil {
+		return 0, err
+	}
+	defer os.Remove(training.Name())
+	defer training.Close()
+	images, count, err := s.writeOSSManifest(ctx, manifest, training, rubric.Dims, f)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := training.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	data, err := archive.Create("data.jsonl")
+	if err != nil {
+		return 0, err
+	}
+	if _, err := io.Copy(data, training); err != nil {
 		return 0, err
 	}
 	for _, img := range images {
@@ -243,7 +264,7 @@ func (s *Server) writeOSSArchive(ctx context.Context, w io.Writer, f exportFilte
 	return count, archive.Close()
 }
 
-func (s *Server) writeOSSManifest(ctx context.Context, w io.Writer, f exportFilters) ([]ossArchiveImage, int, error) {
+func (s *Server) writeOSSManifest(ctx context.Context, w, training io.Writer, dims []score.Dim, f exportFilters) ([]ossArchiveImage, int, error) {
 	clause, args := f.ossWhere()
 	rows, err := s.pool().Query(ctx, exportSelect+" WHERE "+clause+" ORDER BY f.name,i.seq,i.id", args...)
 	if err != nil {
@@ -255,7 +276,7 @@ func (s *Server) writeOSSManifest(ctx context.Context, w io.Writer, f exportFilt
 		return nil, 0, err
 	}
 	encoder := json.NewEncoder(w)
-	imagePaths := make(map[string]string)
+	trainingEncoder := json.NewEncoder(training)
 	var images []ossArchiveImage
 	count := 0
 	for rows.Next() {
@@ -263,16 +284,17 @@ func (s *Server) writeOSSManifest(ctx context.Context, w io.Writer, f exportFilt
 		if err != nil {
 			return nil, 0, err
 		}
-		imagePath, exists := imagePaths[r.RelPath]
-		if !exists {
-			imagePath = trainingImagePath(r)
-			imagePaths[r.RelPath] = imagePath
-			images = append(images, ossArchiveImage{localPath: r.RelPath, archivePath: imagePath})
-		}
+		imagePath := trainingImagePath(r)
+		images = append(images, ossArchiveImage{localPath: r.RelPath, archivePath: imagePath})
 		record := exportJSONRecord(r)
 		delete(record, "rel_path")
 		record["task_id"] = r.ID
 		record["image_path"] = imagePath
+		if content, ok := assistantContent(r, dims); ok {
+			if err := trainingEncoder.Encode(trainingRecord(content, imagePath)); err != nil {
+				return nil, 0, err
+			}
+		}
 		if count > 0 {
 			if _, err := io.WriteString(w, ","); err != nil {
 				return nil, 0, err

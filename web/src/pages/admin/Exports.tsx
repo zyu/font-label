@@ -1,3 +1,4 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
 import {
   Button,
@@ -7,16 +8,15 @@ import {
   Segmented,
   Select,
   Space,
-  Table,
   Tag,
   Typography,
   message,
 } from "antd";
-import { CloudUploadOutlined, DownloadOutlined } from "@ant-design/icons";
+import { CloudUploadOutlined } from "@ant-design/icons";
 import { useQuery } from "@tanstack/react-query";
 import dayjs from "dayjs";
-import { api, downloadBlob, downloadExportByID } from "../../api/client";
-import type { FolderDTO, User } from "../../api/types";
+import { api } from "../../api/client";
+import type { FolderDTO, Page, User } from "../../api/types";
 
 interface Job {
   id: number;
@@ -31,16 +31,13 @@ interface Job {
   object_key?: string;
 }
 
-const fileExtension = (format: string) => format === "jsonl" ? "zip" : format;
-
 export default function ExportsPage() {
-  const [format, setFormat] = useState("xlsx");
+  const [page, setPage] = useState(1);
   const [status, setStatus] = useState("approved");
   const [folders, setFolders] = useState<number[]>([]);
   const [annotators, setAnnotators] = useState<number[]>([]);
   const [range, setRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
   const [dateField, setDateField] = useState("created");
-  const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   const folderList = useQuery({
@@ -52,8 +49,8 @@ export default function ExportsPage() {
     queryFn: () => api.get<{ items: User[] }>("/users?page_size=100"),
   });
   const jobs = useQuery({
-    queryKey: ["export-jobs"],
-    queryFn: () => api.get<{ items: Job[]; oss_enabled: boolean }>("/exports"),
+    queryKey: ["export-jobs", page],
+    queryFn: () => api.get<Page<Job> & { oss_enabled: boolean }>(`/exports?page=${page}&page_size=20`),
     refetchInterval: (query) => query.state.data?.items.some((job) => job.status === "pending" || job.status === "running") ? 2000 : false,
   });
 
@@ -75,24 +72,6 @@ export default function ExportsPage() {
       message.error(error instanceof Error ? error.message : "创建 OSS 上传任务失败");
     } finally {
       setUploading(false);
-      await jobs.refetch();
-    }
-  }
-
-  async function doExport() {
-    setBusy(true);
-    try {
-      const res = await api.exportFile({ format, filters });
-      if (res.blob) {
-        downloadBlob(res.blob, `font-label_${dayjs().format("YYYYMMDD_HHmm")}.${fileExtension(format)}`);
-        message.success("已开始下载");
-      } else if (res.jobId) {
-        message.info(`数据量较大，已创建导出任务 #${res.jobId}，完成后在下方下载`);
-      }
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : "导出失败");
-    } finally {
-      setBusy(false);
       await jobs.refetch();
     }
   }
@@ -132,7 +111,7 @@ export default function ExportsPage() {
               />
             </Space>
           </Form.Item>
-          <Form.Item label="状态与格式" style={{ marginBottom: 12 }}>
+          <Form.Item label="任务状态" style={{ marginBottom: 12 }}>
             <Space wrap size={12}>
               <Segmented
                 value={status}
@@ -143,19 +122,7 @@ export default function ExportsPage() {
                   { label: "全部", value: "all" },
                 ]}
               />
-              <Segmented
-                value={format}
-                onChange={(v) => setFormat(String(v))}
-                options={[
-                  { label: "Excel (.xlsx)", value: "xlsx" },
-                  { label: "CSV", value: "csv" },
-                  { label: "JSON", value: "json" },
-                  { label: "训练集 ZIP", value: "jsonl" },
-                ]}
-              />
-              {/* <Button type="primary" icon={<DownloadOutlined />} loading={busy} onClick={doExport}>
-                导出
-              </Button> */}
+
             </Space>
           </Form.Item>
         </Form>
@@ -172,38 +139,31 @@ export default function ExportsPage() {
         </Space>
         <br />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          「仅已通过」只导出审核通过的评分。需要包含无效图时，请选择「已审核（含打回）」或「全部」。
-          <br />
-          Excel 列：文件夹、服务器文件名、原始文件名、序号、标注员、提交时间、五个维度分数（白平衡/黑平衡/参差/结构/控笔）、总分、等级、点评、状态、审核员、审核时间、驳回次数、异常原因、图片相对路径。
-          <br />
-          训练集 ZIP：一个压缩包内包含一个 <code>data.jsonl</code> 和 <code>images/</code> 目录。
-          N 条样本对应 JSONL 的 N 行及 N 张图片，每行包含 <code>messages</code> 与 <code>images</code>，图片路径与压缩包内一致，文件名全局唯一。
-          只输出<b>审核通过</b>与<b>无效图</b>两类样本（未审核的不进训练集），无效图为「无效：原因，建议重拍」。
-          超过 5000 行会自动转异步任务。
+          ZIP 包含标注 JSON、原图和训练集 JSONL。训练集收录审核通过且五维等级齐全的正常标注。
+          「已审核（含打回）」和「全部」也可包含异常记录。
         </Typography.Text>
       </Card>
 
       <Card size="small" title="导出记录">
-        <Table
+        <ListTable
           rowKey="id"
           size="small"
           dataSource={jobs.data?.items ?? []}
-          pagination={false}
+          pagination={{ current: page, pageSize: 20, total: jobs.data?.total, onChange: setPage }}
           columns={[
             { title: "#", dataIndex: "id", width: 70 },
             {
               title: "格式", dataIndex: "format", width: 100,
-              render: (value: string, row: Job) => row.destination === "oss" ? "OSS ZIP" :
-                value === "jsonl" ? "训练集 ZIP" : value.toUpperCase(),
+              render: () => "OSS ZIP",
             },
             {
               title: "状态",
               dataIndex: "status",
               width: 110,
-              render: (value: string, row: Job) => {
-                if (value === "done") return <Tag color="green">{row.destination === "oss" ? "已上传" : "已完成"}</Tag>;
+              render: (value: string) => {
+                if (value === "done") return <Tag color="green">已上传</Tag>;
                 if (value === "failed") return <Tag color="red">失败</Tag>;
-                return <Tag color="processing">{value === "pending" ? "等待中" : row.destination === "oss" ? "打包或上传中" : "导出中"}</Tag>;
+                return <Tag color="processing">{value === "pending" ? "等待中" : "打包或上传中"}</Tag>;
               },
             },
             { title: "行数", dataIndex: "row_count", width: 90 },
@@ -215,15 +175,13 @@ export default function ExportsPage() {
               width: 120,
               render: (_: unknown, row: Job) => {
                 if (row.status !== "done") return "—";
-                if (row.destination === "oss") return (
+                return (
                   <Space wrap>
                     {row.object_url && <a href={row.object_url} target="_blank" rel="noopener noreferrer">对象地址</a>}
                     {row.object_key && <Typography.Text copyable={{ text: row.object_key, tooltips: ["复制对象键", "已复制"] }} />}
                   </Space>
                 );
-                if (row.expires_at && dayjs(row.expires_at).isBefore(dayjs())) return "已过期";
-                return <a onClick={() => downloadExportByID(row.id, `font-label_${row.id}.${fileExtension(row.format)}`)
-                  .catch((error) => message.error(error instanceof Error ? error.message : "下载失败"))}>下载</a>;
+
               },
             },
           ]}

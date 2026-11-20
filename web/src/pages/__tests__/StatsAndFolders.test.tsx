@@ -24,10 +24,10 @@ function mount(Page: typeof StatsPage) {
   { id:2, name:"未完成批次", total:6, unassigned:1, assigned:1, submitted:1, approved:1, rejected:1, excluded:1 },
  ];
  qc.setQueryData(["stats-me"], { holding:2, rejected:0, pending:1, approved:7, submitted_today:0, granted:21, avg_total:80, reject_events:7 });
- qc.setQueryData(["folders", "all"], { items:folders });
- qc.setQueryData(["stats-folders"], { items:folders });
+ qc.setQueryData(["folders", "all", 1], { items:folders });
+ qc.setQueryData(["stats-folders", 1], { items:folders });
  qc.setQueryData(["stats-overview"], {});
- qc.setQueryData(["stats-annotators"], { items:[] });
+ qc.setQueryData(["stats-annotators", 1], { items:[] });
  qc.setQueryData(["stats-rejections"], { reasons:[] });
  qc.setQueryData(["stats-series"], { points:[] });
  render(<QueryClientProvider client={qc}><Page /></QueryClientProvider>);
@@ -46,7 +46,7 @@ describe("统计口径与文件夹状态展示", () => {
  it.each([["文件夹列表", FoldersPage], ["统计文件夹进度", StatsPage]] as const)("%s展示无效图和标注中，进度只计审核完成图片", (_, Page) => {
   mount(Page);
   const row = screen.getByRole("row", { name:/QA_R2_上传_1812/ });
-  const table = row.closest("table")!;
+  const table = row.closest<HTMLElement>(".ant-table-wrapper")!;
   const headers = within(table).getAllByRole("columnheader").map((header) => header.textContent);
   const excludedIndex = headers.indexOf("无效图");
   const assignedIndex = headers.indexOf("标注中");

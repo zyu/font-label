@@ -1,19 +1,21 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
-import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Table, Tag, Tooltip, Typography, message } from "antd";
+import { Button, Card, Form, Input, Modal, Popconfirm, Progress, Space, Tag, Tooltip, Typography, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
-import type { FolderDTO } from "../../api/types";
+import type { FolderDTO, Page } from "../../api/types";
 
 export default function FoldersPage() {
   const qc = useQueryClient();
+  const [page, setPage] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<FolderDTO | null>(null);
   const [form] = Form.useForm();
   const [renameForm] = Form.useForm();
 
   const folders = useQuery({
-    queryKey: ["folders", "all"],
-    queryFn: () => api.get<{ items: FolderDTO[] }>("/folders?include_archived=1"),
+    queryKey: ["folders", "all", page],
+    queryFn: () => api.get<Page<FolderDTO>>(`/folders?include_archived=1&page=${page}&page_size=20`),
   });
 
   const refresh = () => {
@@ -55,19 +57,19 @@ export default function FoldersPage() {
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <Card
         size="small"
-        title={`文件夹（${folders.data?.items?.length ?? 0}）`}
+        title={`文件夹（${folders.data?.total ?? 0}）`}
         extra={
           <Button type="primary" onClick={() => setCreateOpen(true)}>
             新建文件夹
           </Button>
         }
       >
-        <Table
+        <ListTable
           rowKey="id"
           size="small"
           loading={folders.isLoading}
           dataSource={folders.data?.items ?? []}
-          pagination={false}
+          pagination={{ current: page, pageSize: 20, total: folders.data?.total, onChange: setPage }}
           columns={[
             {
               title: "名称",

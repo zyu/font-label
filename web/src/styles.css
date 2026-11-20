@@ -271,3 +271,15 @@ body {
   }
   .guide-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+.app-shell { height: 100dvh; overflow: hidden; }
+.app-shell .app-sider { height: 100%; overflow-y: auto; }
+.app-main { min-height: 0; overflow: hidden; }
+.app-header { flex-shrink: 0; }
+.app-content { min-width: 0; min-height: 0; overflow: auto; }
+.stats-page, .stats-page > .ant-space-item { width: 100%; min-width: 0; max-width: 100%; }
+.stats-page { overflow-x: clip; padding-inline: 6px; }
+.stats-page .ant-col { min-width: 0; }
+.quality-image-frame { height: min(360px, 52dvh); min-height: 220px; display: flex; flex-direction: column; }
+.rating-comments { max-width: min(260px, 65vw); }
+.rating-comments > .ant-space-item { min-width: 0; }

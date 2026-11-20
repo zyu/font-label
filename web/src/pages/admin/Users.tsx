@@ -1,5 +1,6 @@
+import ListTable from "../../components/ListTable";
 import { useState } from "react";
-import { Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from "antd";
+import { Button, Card, Form, Input, Modal, Select, Space, Tag, Typography, message } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { User } from "../../api/types";
@@ -8,13 +9,14 @@ const ROLE_LABEL: Record<string, string> = { admin: "管理员", reviewer: "审�
 
 export default function UsersPage() {
   const qc = useQueryClient();
+  const [page, setPage] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
   const [newPassword, setNewPassword] = useState<{ username: string; password: string } | null>(null);
   const [form] = Form.useForm();
 
   const users = useQuery({
-    queryKey: ["users"],
-    queryFn: () => api.get<{ items: User[]; total: number }>("/users?page_size=100"),
+    queryKey: ["users", page],
+    queryFn: () => api.get<{ items: User[]; total: number }>(`/users?page_size=20&page=${page}`),
   });
 
   const create = useMutation({
@@ -57,12 +59,12 @@ export default function UsersPage() {
           </Button>
         }
       >
-        <Table
+        <ListTable
           rowKey="id"
           size="small"
           loading={users.isLoading}
           dataSource={users.data?.items ?? []}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
+          pagination={{ current: page, pageSize: 20, total: users.data?.total, onChange: setPage }}
           columns={[
             { title: "账号", dataIndex: "username" },
             { title: "姓名", dataIndex: "display_name" },

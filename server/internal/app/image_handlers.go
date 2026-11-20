@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
@@ -96,12 +97,18 @@ func (s *Server) handleGetImage(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	row, err := s.imageByID(ctx, id)
+	tx, err := s.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	row, err := scanImage(tx.QueryRow(ctx, imageSelectByID, id))
 	if err != nil {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
-	if err := s.requireImageAccess(c, id, row.AnnotatorID); err != nil {
+	if err := requireImageAccess(c, tx, id, row.AnnotatorID); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
@@ -109,12 +116,16 @@ func (s *Server) handleGetImage(c *gin.Context) {
 	var draft any
 	var raw string
 	if row.Status == "assigned" || row.Status == "rejected" {
-		if err := s.pool().QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`SELECT payload::text FROM drafts WHERE user_id=$1 AND image_id=$2`, auth.MustCurrent(c).ID, id).Scan(&raw); err == nil {
 			_ = json.Unmarshal([]byte(raw), &draft)
 		}
 	}
-	reviews, err := s.reviewsOf(ctx, id)
+	reviewImageID, reviewVersion := id, 0
+	if row.ExceptionLockID != 0 {
+		reviewImageID, reviewVersion = row.ExceptionLockID, row.AnnotationVersion
+	}
+	reviews, err := reviewsOf(ctx, tx, reviewImageID, reviewVersion)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -126,19 +137,29 @@ func (s *Server) handleGetImage(c *gin.Context) {
 	})
 }
 
-func (s *Server) reviewsOf(ctx context.Context, imageID int64) ([]ReviewDTO, error) {
-	rows, err := s.pool().Query(ctx,
+type imageQueries interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func reviewsOf(ctx context.Context, db imageQueries, imageID int64, version int) ([]ReviewDTO, error) {
+	rows, err := db.Query(ctx,
 		`SELECT r.id,r.action,r.comment,r.reason_tags,COALESCE(u.display_name,''),
-		        COALESCE(r.score_patch::text,''),r.created_at,r.annotation_version,'review'
-		   FROM reviews r LEFT JOIN users u ON u.id=r.reviewer_id WHERE r.image_id=$1
+		        COALESCE(r.grade_patch::text,''),r.created_at,r.annotation_version,'review'
+		   FROM reviews r JOIN images i ON i.id=r.image_id
+		   LEFT JOIN users u ON u.id=r.reviewer_id
+		  WHERE r.image_id=$1 AND r.annotation_version>i.voided_through_version
+		    AND ($2=0 OR r.annotation_version=$2)
 		  UNION ALL
 		 SELECT -d.id,CASE WHEN d.result='return' THEN 'reject' ELSE 'approve' END,
 		        COALESCE(NULLIF(d.note,''),NULLIF(q.note,''),'仲裁已完成'),'{}',
 		        COALESCE(u.display_name,''),'',d.finished_at,r.annotation_version,'arbitration'
 		   FROM quality_disputes d JOIN quality_samples q ON q.id=d.sample_id
-		   JOIN reviews r ON r.id=q.review_id LEFT JOIN users u ON u.id=d.arbiter_id
-		  WHERE q.image_id=$1 AND d.result IS NOT NULL
-		  ORDER BY created_at DESC`, imageID)
+		   JOIN reviews r ON r.id=q.review_id JOIN images i ON i.id=q.image_id
+		   LEFT JOIN users u ON u.id=d.arbiter_id
+		  WHERE q.image_id=$1 AND d.result IS NOT NULL AND r.annotation_version>i.voided_through_version
+		    AND ($2=0 OR r.annotation_version=$2)
+		  ORDER BY created_at DESC`, imageID, version)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +175,7 @@ func (s *Server) reviewsOf(ctx context.Context, imageID int64) ([]ReviewDTO, err
 		if patch != "" && patch != "null" {
 			var v any
 			_ = json.Unmarshal([]byte(patch), &v)
-			rv.ScorePatch = v
+			rv.GradePatch = v
 		}
 		if rv.ReasonTags == nil {
 			rv.ReasonTags = []string{}
@@ -176,13 +197,14 @@ func (s *Server) handleHistory(c *gin.Context) {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
-	if err := s.requireImageAccess(c, id, row.AnnotatorID); err != nil {
+	if err := requireImageAccess(c, s.pool(), id, row.AnnotatorID); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
 	rows, err := s.pool().Query(ctx,
 		`SELECT v.version, COALESCE(u.display_name,''), v.payload::text, v.submitted_at
 		   FROM annotation_versions v
+		   JOIN images i ON i.id=v.image_id AND v.version>i.voided_through_version
 		   LEFT JOIN users u ON u.id = v.annotator_id
 		  WHERE v.image_id=$1 ORDER BY v.version DESC`, id)
 	if err != nil {
@@ -205,7 +227,7 @@ func (s *Server) handleHistory(c *gin.Context) {
 		_ = json.Unmarshal([]byte(raw), &payload)
 		versions = append(versions, gin.H{"version": ver, "annotator": who, "payload": payload, "submitted_at": at})
 	}
-	reviews, err := s.reviewsOf(ctx, id)
+	reviews, err := reviewsOf(ctx, s.pool(), id, 0)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -249,7 +271,7 @@ func (s *Server) handleDeleteImage(c *gin.Context) {
 	httpx.OK(c, gin.H{"ok": true})
 }
 
-func (s *Server) requireImageAccess(c *gin.Context, id, annotatorID int64) error {
+func requireImageAccess(c *gin.Context, db imageQueries, id, annotatorID int64) error {
 	me := auth.MustCurrent(c)
 	switch me.Role {
 	case "admin":
@@ -260,7 +282,7 @@ func (s *Server) requireImageAccess(c *gin.Context, id, annotatorID int64) error
 		}
 	case "reviewer":
 		var allowed bool
-		err := s.pool().QueryRow(c.Request.Context(), `SELECT `+reviewScope("$2", "$3")+` FROM images i WHERE i.id=$1`,
+		err := db.QueryRow(c.Request.Context(), `SELECT `+reviewScope("$2", "$3")+` FROM images i WHERE i.id=$1`,
 			id, me.Role, me.ID).Scan(&allowed)
 		if err != nil {
 			return err

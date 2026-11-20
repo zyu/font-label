@@ -31,7 +31,6 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [templates, setTemplates] = useState("");
   const [reasons, setReasons] = useState("");
-  const [weights, setWeights] = useState<Record<string, number>>({});
   const [commentMin, setCommentMin] = useState(10);
   const [commentMax, setCommentMax] = useState(50);
   const [saving, setSaving] = useState(false);
@@ -44,9 +43,6 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!rubric.data) return;
-    const w: Record<string, number> = {};
-    rubric.data.dims.forEach((d) => (w[d.key] = d.weight));
-    setWeights(w);
     setCommentMin(rubric.data.dim_comment_min ?? 10);
     setCommentMax(rubric.data.dim_comment_max ?? 50);
   }, [rubric.data]);
@@ -82,26 +78,17 @@ export default function SettingsPage() {
 
   async function saveRubric() {
     if (!rubric.data) return;
-    const sum = Object.values(weights).reduce((a, b) => a + b, 0);
-    if (Math.abs(sum - 1) > 0.001) {
-      message.error(`权重之和必须为 1，当前 ${sum.toFixed(2)}`);
-      return;
-    }
     setSaving(true);
     try {
       const body = {
         name: `${rubric.data.name.replace(/（.*）$/, "")}（自定义 ${new Date().toLocaleDateString("zh-CN")}）`,
-        dims: rubric.data.dims.map((d) => ({ ...d, weight: weights[d.key] })),
-        grade_bands: rubric.data.grade_bands,
-        comment_min: rubric.data.comment_min,
-        comment_max: rubric.data.comment_max,
+        dims: rubric.data.dims,
         dim_comment_min: commentMin,
         dim_comment_max: commentMax,
-        allow_total_override: rubric.data.allow_total_override,
       };
       const created = await api.post<{ id: number }>("/rubrics", body);
       await api.post(`/rubrics/${created.id}/activate`, {});
-      message.success("已保存并启用新的评分方案（历史数据保留旧快照）");
+      message.success("已保存并启用新的评级方案（历史数据保留旧快照）");
       rubric.refetch();
       reload();
     } catch (e) {
@@ -115,7 +102,7 @@ export default function SettingsPage() {
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <Card
         size="small"
-        title="评分方案（维度与权重）"
+        title="五维评级方案"
         extra={
           <Button type="primary" loading={saving} onClick={saveRubric}>
             保存为新方案并启用
@@ -123,7 +110,7 @@ export default function SettingsPage() {
         }
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          总分 = Σ(维度分 ÷ 满分 × 权重) ÷ Σ权重 × 100，由服务端计算并在每次提交时留存快照。现行方案为五维各 20 分（等权 0.2，总分即五维相加）。修改权重会新建方案并启用，历史标注仍用旧方案口径。
+          每个维度独立选择 S、A、B、C 或 D，并填写对应评语。
         </Typography.Paragraph>
         <Table
           size="small"
@@ -133,20 +120,7 @@ export default function SettingsPage() {
           columns={[
             { title: "维度", dataIndex: "label", width: 120, render: (v: string) => <Tag color="blue">{v}</Tag> },
             { title: "标识", dataIndex: "key", width: 140 },
-            { title: "满分", dataIndex: "max", width: 90 },
-            {
-              title: "权重",
-              width: 160,
-              render: (_: unknown, d: { key: string }) => (
-                <InputNumber
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={weights[d.key]}
-                  onChange={(v) => setWeights((prev) => ({ ...prev, [d.key]: Number(v ?? 0) }))}
-                />
-              ),
-            },
+            { title: "可选等级", render: () => "S / A / B / C / D" },
           ]}
         />
         <Space style={{ marginTop: 12 }} wrap>
@@ -154,7 +128,6 @@ export default function SettingsPage() {
           <InputNumber min={1} max={200} value={commentMin} onChange={(v) => setCommentMin(Number(v ?? 10))} />
           <span>上限</span>
           <InputNumber min={10} max={500} value={commentMax} onChange={(v) => setCommentMax(Number(v ?? 50))} />
-          <Typography.Text type="secondary">等级线：优秀 ≥90 / 良好 80~89 / 中等 70~79 / 及格 60~69 / 需加油 &lt;60</Typography.Text>
         </Space>
       </Card>
 
