@@ -1,4 +1,4 @@
-export type Role = "admin" | "reviewer" | "annotator";
+export type Role = "admin" | "reviewer" | "annotator" | "quality";
 
 export interface User {
   id: number;
@@ -65,6 +65,10 @@ export type ImageStatus =
   | "excluded";
 
 export interface ImageDTO {
+  group_id?: number;
+  group?: string;
+  sample_id?: string;
+  quality_pending?: boolean;
   id: number;
   folder_id: number;
   folder: string;
@@ -96,6 +100,7 @@ export interface ImageDTO {
 }
 
 export interface Review {
+  source?: "review" | "arbitration";
   id: number;
   action: "approve" | "reject";
   comment: string;

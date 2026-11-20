@@ -80,8 +80,16 @@ function AnnotationEditor({ id }: { id: number }) {
     enabled: Number.isFinite(id) && id > 0,
   });
 
+  const image = detail.data?.image;
+  const canEdit = !image?.quality_pending && (image?.status === "assigned" || image?.status === "rejected");
+  const neighbors = useQuery({
+    queryKey: ["task-neighbors", id],
+    queryFn: () => api.get<{ prev_id: number | null; next_id: number | null; first_id: number | null }>(`/claims/my/${id}/neighbors`),
+    enabled: !!image?.group_id && !!canEdit,
+  });
   const queue = useQuery({
     queryKey: ["annotate-queue"],
+    enabled: !!image && !image.group_id,
     queryFn: async () => {
       const tasks = async (status: string) => {
         const items: ImageDTO[] = [];
@@ -98,9 +106,6 @@ function AnnotationEditor({ id }: { id: number }) {
       return [...rejected, ...active];
     },
   });
-
-  const image = detail.data?.image;
-  const canEdit = image?.status === "assigned" || image?.status === "rejected";
 
   useEffect(() => {
     if (!image || initialized === `${image.id}:${image.status}`) return;
@@ -180,6 +185,13 @@ function AnnotationEditor({ id }: { id: number }) {
         return;
       }
       try {
+        if (image?.group_id) {
+          const refreshed = await neighbors.refetch({ throwOnError: true });
+          const nextId = refreshed.data?.next_id ?? refreshed.data?.first_id;
+          if (nextId) nav(`/workbench/${nextId}`, { state: location.state });
+          else nav(returnTo);
+          return;
+        }
         const refreshed = await queue.refetch({ throwOnError: true });
         const remaining = (refreshed.data ?? []).filter((item) => item.id !== id);
         const available = new Map(remaining.map((item) => [item.id, item]));
@@ -234,11 +246,11 @@ function AnnotationEditor({ id }: { id: number }) {
 
   const list = queue.data ?? [];
   const idx = list.findIndex((x) => x.id === id);
-  const prev = canEdit && idx > 0 ? list[idx - 1] : undefined;
-  const next = canEdit && idx >= 0 && idx < list.length - 1 ? list[idx + 1] : undefined;
+  const prev = canEdit ? (image?.group_id ? neighbors.data?.prev_id : list[idx - 1]?.id) : undefined;
+  const next = canEdit ? (image?.group_id ? neighbors.data?.next_id : idx >= 0 ? list[idx + 1]?.id : undefined) : undefined;
 
-  function go(target?: ImageDTO) {
-    if (target) navigateTo(`/workbench/${target.id}`);
+  function go(target?: number | null) {
+    if (target) navigateTo(`/workbench/${target}`);
   }
 
   function navigateTo(path: string) {
@@ -323,7 +335,8 @@ function AnnotationEditor({ id }: { id: number }) {
           <Typography.Text type="secondary">
             第 {idx >= 0 ? idx + 1 : 1} / {list.length || 1} 张
           </Typography.Text>
-          {image.status === "rejected" && <Tag color="error">被打回 {image.reject_count} 次</Tag>}
+          {image.quality_pending && <Tag color="orange">待质检或仲裁</Tag>}
+          {image.status === "rejected" && !image.quality_pending && <Tag color="error">被打回 {image.reject_count} 次</Tag>}
         </Space>
         <Space>
           <Tooltip title="上一张 (←)">
@@ -358,7 +371,7 @@ function AnnotationEditor({ id }: { id: number }) {
           {lastReject && (
             <div className="reject-card">
               <div className="who">
-                审核批注 · {lastReject.reviewer} ·{" "}
+                {lastReject.source === "arbitration" ? "仲裁批注" : "审核批注"} · {lastReject.reviewer} ·{" "}
                 {new Date(lastReject.created_at).toLocaleString("zh-CN")}
               </div>
               <div className="body">{lastReject.comment}</div>

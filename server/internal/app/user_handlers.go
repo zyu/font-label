@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
@@ -86,7 +88,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 	if in.DisplayName == "" {
 		fields["display_name"] = "请填写姓名"
 	}
-	if in.Role != "admin" && in.Role != "reviewer" && in.Role != "annotator" {
+	if !validRole(in.Role) {
 		fields["role"] = "角色不合法"
 	}
 	if len(in.Password) < 8 {
@@ -103,10 +105,26 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 	}
 	me := auth.MustCurrent(c)
 	var id int64
-	err = s.pool().QueryRow(c.Request.Context(),
-		`INSERT INTO users (username, password_hash, display_name, role, must_change_pwd, created_by)
-		 VALUES ($1,$2,$3,$4,true,$5) RETURNING id`,
-		in.Username, hash, in.DisplayName, in.Role, me.ID).Scan(&id)
+	ctx := c.Request.Context()
+	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		if in.Role == "quality" {
+			if err := lockQualityPolicy(ctx, tx); err != nil {
+				return err
+			}
+		}
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO users (username, password_hash, display_name, role, must_change_pwd, created_by)
+			 VALUES ($1,$2,$3,$4,true,$5) RETURNING id`,
+			in.Username, hash, in.DisplayName, in.Role, me.ID).Scan(&id); err != nil {
+			return err
+		}
+		if in.Role == "quality" {
+			if err := assignUnclaimedSamples(ctx, tx); err != nil {
+				return err
+			}
+		}
+		return s.insertAudit(c, tx, "user.create", "user", id, map[string]any{"username": in.Username, "role": in.Role})
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 			httpx.Fail(c, httpx.Conflict("账号已存在"))
@@ -115,7 +133,6 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	s.audit(c, "user.create", "user", id, map[string]any{"username": in.Username, "role": in.Role})
 	httpx.OK(c, gin.H{"id": id})
 }
 
@@ -139,9 +156,37 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		httpx.Fail(c, httpx.Conflict("不能停用自己的账号"))
 		return
 	}
+	if (in.Role != nil && !validRole(*in.Role)) ||
+		(in.Status != nil && *in.Status != "active" && *in.Status != "disabled") {
+		httpx.Fail(c, httpx.BadRequest("角色或账号状态不合法"))
+		return
+	}
 	ctx := c.Request.Context()
-	tag, err := s.pool().Exec(ctx,
-		`UPDATE users SET
+	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		if err := lockGroupManagement(ctx, tx); err != nil {
+			return err
+		}
+		var oldRole, oldStatus string
+		if err := tx.QueryRow(ctx, `SELECT role,status FROM users WHERE id=$1`, id).Scan(&oldRole, &oldStatus); err != nil {
+			if err == pgx.ErrNoRows {
+				return httpx.NotFound("用户不存在")
+			}
+			return err
+		}
+		newRole, newStatus := oldRole, oldStatus
+		if in.Role != nil {
+			newRole = *in.Role
+		}
+		if in.Status != nil {
+			newStatus = *in.Status
+		}
+		if oldRole != newRole || oldStatus != newStatus {
+			if err := validateUserWorkflowChange(ctx, tx, id, oldRole, newRole, newStatus); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx,
+			`UPDATE users SET
 		   display_name = COALESCE($2, display_name),
 		   role = COALESCE($3, role),
 		   status = COALESCE($4, status),
@@ -149,15 +194,27 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		     WHEN ($3 IS NOT NULL AND $3 <> role) OR ($4 IS NOT NULL AND $4 <> status) THEN 1 ELSE 0 END,
 		   updated_at = now()
 		 WHERE id=$1`, id, in.DisplayName, in.Role, in.Status)
+		if err != nil {
+			return err
+		}
+		if newRole != "annotator" && newRole != "reviewer" {
+			if _, err := tx.Exec(ctx, `DELETE FROM annotation_group_members WHERE user_id=$1`, id); err != nil {
+				return err
+			}
+		}
+		if newRole == "quality" && newStatus == "active" && (oldRole != newRole || oldStatus != newStatus) {
+			if err := assignUnclaimedSamples(ctx, tx); err != nil {
+				return err
+			}
+		}
+		return s.insertAudit(c, tx, "user.update", "user", id, map[string]any{
+			"role": in.Role, "status": in.Status, "display_name": in.DisplayName,
+		})
+	})
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		httpx.Fail(c, httpx.NotFound("用户不存在"))
-		return
-	}
-	s.audit(c, "user.update", "user", id, map[string]any{"role": in.Role, "status": in.Status})
 	httpx.OK(c, gin.H{"ok": true})
 }
 
@@ -200,9 +257,9 @@ func (s *Server) handleUserStats(c *gin.Context) {
 		SELECT
 		  (SELECT count(*) FROM claims WHERE user_id=$1),
 		  (SELECT COALESCE(sum(granted),0) FROM claims WHERE user_id=$1),
-		  count(*) FILTER (WHERE status='submitted'),
-		  count(*) FILTER (WHERE status='approved'),
-		  count(*) FILTER (WHERE status='rejected'),
+		  count(*) FILTER (WHERE status='submitted' OR quality_pending),
+		  count(*) FILTER (WHERE status='approved' AND NOT quality_pending),
+		  count(*) FILTER (WHERE status='rejected' AND NOT quality_pending),
 		  count(*) FILTER (WHERE status='assigned')
 		  FROM images WHERE annotator_id=$1`, id)
 	var claims, granted, submitted, approved, rejected, assigned int
@@ -232,4 +289,51 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+func validRole(role string) bool {
+	return role == "admin" || role == "reviewer" || role == "annotator" || role == "quality"
+}
+
+func lockQualityPolicy(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT 1 FROM quality_policy WHERE singleton FOR UPDATE`)
+	return err
+}
+
+func validateUserWorkflowChange(ctx context.Context, tx pgx.Tx, id int64, oldRole, newRole, newStatus string) error {
+	if oldRole == "quality" || newRole == "quality" {
+		if err := lockQualityPolicy(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if oldRole == newRole && newStatus == "active" {
+		return nil
+	}
+	var busy bool
+	switch oldRole {
+	case "annotator":
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM images WHERE group_id IS NOT NULL AND annotator_id=$1
+			AND (quality_pending OR status NOT IN ('approved','excluded')))`, id).Scan(&busy); err != nil {
+			return err
+		}
+	case "reviewer":
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM annotation_group_members gm WHERE gm.user_id=$1
+			AND EXISTS (SELECT 1 FROM images WHERE group_id=gm.group_id AND
+			    (quality_pending OR status NOT IN ('approved','excluded')))
+			AND NOT EXISTS (SELECT 1 FROM annotation_group_members other JOIN users u ON u.id=other.user_id
+			    WHERE other.group_id=gm.group_id AND u.id<>$1 AND u.role='reviewer' AND u.status='active')
+		)`, id).Scan(&busy); err != nil {
+			return err
+		}
+	case "quality":
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM quality_samples WHERE inspector_id=$1 AND result IS NULL)
+			OR EXISTS (SELECT 1 FROM quality_disputes WHERE arbiter_id=$1 AND result IS NULL)`, id).Scan(&busy); err != nil {
+			return err
+		}
+	}
+	if busy {
+		return httpx.Conflict("该用户仍负责未结任务，请先处理相关任务")
+	}
+	return nil
 }

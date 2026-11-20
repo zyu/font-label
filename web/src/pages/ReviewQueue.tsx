@@ -10,8 +10,10 @@ export default function ReviewQueuePage() {
   const [params, setParams] = useSearchParams();
   const kind = params.get("kind") ?? "";
   const folderId = Number(params.get("folder_id")) || undefined;
+  const page = Math.max(1, Number(params.get("page")) || 1);
   const setFilter = (key: string, value: string) => setParams((current) => {
     const next = new URLSearchParams(current);
+    if (key !== "page") next.delete("page");
     if (value) next.set(key, value); else next.delete(key);
     return next;
   });
@@ -23,9 +25,9 @@ export default function ReviewQueuePage() {
   });
 
   const queue = useQuery({
-    queryKey: ["review-queue", kind, folderId],
+    queryKey: ["review-queue", kind, folderId, page],
     queryFn: () => {
-      const qs = new URLSearchParams({ page_size: "100" });
+      const qs = new URLSearchParams({ page_size: "20", page: String(page) });
       if (kind) qs.set("kind", kind);
       if (folderId) qs.set("folder_id", String(folderId));
       return api.get<Page<ImageDTO>>(`/reviews/queue?${qs.toString()}`);
@@ -45,6 +47,7 @@ export default function ReviewQueuePage() {
     },
     { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => openReview(row.id)}>{v}</a> },
     { title: "文件夹", dataIndex: "folder" },
+    { title: "分组", dataIndex: "group", render: (group?: string) => group || "—" },
     { title: "标注员", dataIndex: "annotator" },
     {
       title: "类型",
@@ -115,13 +118,13 @@ export default function ReviewQueuePage() {
           loading={queue.isLoading}
           dataSource={items}
           columns={columns as never}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
+          pagination={{ current: page, total: queue.data?.total, pageSize: 20, showSizeChanger: false, onChange: (value) => setFilter("page", value > 1 ? String(value) : "") }}
           locale={{ emptyText: <Empty description="队列空了，所有提交都审完了" /> }}
         />
       </Card>
 
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        说明：审核队列只显示别人标注的图片（不会出现自己的），按提交时间先进先出。打回必须填写批注，标注员会看到原文。
+        说明：审核员按提交时间处理同组任务。打回时填写的批注会显示给标注员。
         <span style={{ display: "none" }}>{STATUS_LABEL.submitted}</span>
       </Typography.Text>
     </Space>

@@ -37,15 +37,18 @@ type exportFilters struct {
 }
 
 type exportRow struct {
-	ID         int64
-	FolderID   int64
-	Folder     string
-	StoredName string
-	OrigName   string
-	Seq        int
-	Annotator  string
-	Submitted  *time.Time
-	Scores     map[string]int
+	Group          string
+	SampleNo       int64
+	QualityPending bool
+	ID             int64
+	FolderID       int64
+	Folder         string
+	StoredName     string
+	OrigName       string
+	Seq            int
+	Annotator      string
+	Submitted      *time.Time
+	Scores         map[string]int
 	// 五维各自的点评
 	DimComments map[string]string
 	Total       *float64
@@ -65,9 +68,10 @@ SELECT f.name, i.stored_name, i.orig_name, i.seq, COALESCE(u.display_name,''),
        a.total, COALESCE(a.grade,''),
        COALESCE(a.comment,''), i.status, COALESCE(rv.display_name,''), i.reviewed_at,
        i.reject_count, COALESCE(array_to_string(a.exception_reasons, '、'),''), i.rel_path,
-       i.folder_id, i.id
+       i.folder_id, i.id, COALESCE(g.name,''), i.sample_no, i.quality_pending
   FROM images i
   JOIN folders f ON f.id = i.folder_id
+  LEFT JOIN annotation_groups g ON g.id=i.group_id
   LEFT JOIN annotations a ON a.image_id = i.id
   LEFT JOIN users u ON u.id = i.annotator_id
   LEFT JOIN LATERAL (
@@ -82,7 +86,7 @@ func scanExportRow(rows pgx.Rows) (exportRow, error) {
 	var submitted, reviewed *time.Time
 	if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
 		&submitted, &scores, &dimComments, &total, &r.Grade, &r.Comment, &r.Status, &r.Reviewer,
-		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID, &r.ID); err != nil {
+		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID, &r.ID, &r.Group, &r.SampleNo, &r.QualityPending); err != nil {
 		return r, err
 	}
 	r.Submitted, r.ReviewedAt, r.Total = submitted, reviewed, total
@@ -98,14 +102,14 @@ func scanExportRow(rows pgx.Rows) (exportRow, error) {
 }
 
 func (f exportFilters) where() (string, []any) {
-	clause := " i.id > 0"
+	clause := " i.id > 0 AND " + workflowImageSQL
 	args := []any{}
 	switch f.Status {
 	case "all":
 	case "reviewed":
-		clause += " AND i.status IN ('approved','excluded','rejected')"
+		clause += " AND i.status IN ('approved','excluded','rejected') AND NOT i.quality_pending"
 	default:
-		clause += " AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"
+		clause += " AND i.status = 'approved' AND NOT i.quality_pending AND a.kind = 'score' AND a.total IS NOT NULL"
 	}
 	if len(f.Folders) > 0 {
 		args = append(args, f.Folders)
@@ -133,7 +137,7 @@ func (f exportFilters) where() (string, []any) {
 func (s *Server) exportRows(c *gin.Context, f exportFilters) ([]exportRow, error) {
 	clause, args := f.where()
 	rows, err := s.pool().Query(c.Request.Context(),
-		exportSelect+" WHERE "+clause+" ORDER BY f.name, i.seq", args...)
+		exportSelect+" WHERE "+clause+" ORDER BY f.name, i.seq, i.id", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +252,12 @@ func (s *Server) exportPath(jobID int64, format string) string {
 func (s *Server) failExportJob(ctx context.Context, jobID int64, cause error) {
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if _, err := s.pool().Exec(finishCtx, `UPDATE export_jobs SET status='failed', error=$2, finished_at=now() WHERE id=$1`, jobID, cause.Error()); err != nil {
+	if _, err := s.pool().Exec(finishCtx, `WITH failed AS (
+		UPDATE export_jobs SET status='failed', error=$2, finished_at=now()
+		WHERE id=$1 RETURNING id,user_id,format
+	)
+	INSERT INTO audit_logs(actor_id,action,target_type,target_id,detail)
+	SELECT user_id,'export.failed','export',id,jsonb_build_object('format',format) FROM failed`, jobID, cause.Error()); err != nil {
 		slog.Error("export failure status update failed", "id", jobID, "err", err)
 	}
 }
@@ -303,8 +312,14 @@ func (s *Server) writeExportFile(ctx context.Context, jobID int64, format string
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_, err = s.pool().Exec(finishCtx,
-		`UPDATE export_jobs SET status='done', file_path=$2, row_count=$3,
-		 finished_at=now(), expires_at=now() + interval '24 hours' WHERE id=$1`, jobID, target, count)
+		`WITH completed AS (
+			UPDATE export_jobs SET status='done', file_path=$2, row_count=$3,
+				finished_at=now(), expires_at=now() + interval '24 hours' WHERE id=$1
+			RETURNING id,user_id,format,row_count
+		)
+		INSERT INTO audit_logs(actor_id,action,target_type,target_id,detail)
+		SELECT user_id,'export.complete','export',id,jsonb_build_object('format',format,'rows',row_count)
+		FROM completed`, jobID, target, count)
 	if err != nil {
 		_ = os.Remove(target)
 	}
@@ -486,7 +501,7 @@ var baseHeaders = []string{
 
 var tailHeaders = []string{
 	"总分", "等级",
-	"状态", "审核员", "审核时间", "驳回次数", "异常原因", "图片相对路径",
+	"状态", "审核员", "审核时间", "驳回次数", "异常原因", "图片相对路径", "样本编号", "分组",
 }
 
 // exportHeaders 每个维度占两列：分数 + 该维度的点评（现行为五维各 20 分、各 10~50 字点评）
@@ -516,6 +531,9 @@ func rowValues(r exportRow, dims []score.Dim) []string {
 		"approved": "已通过", "excluded": "无效图", "rejected": "已打回",
 		"submitted": "待审核", "assigned": "已领取", "unassigned": "待领取",
 	}[r.Status]
+	if r.QualityPending {
+		statusLabel = "待质检或仲裁"
+	}
 
 	out := []string{
 		r.Folder, r.StoredName, r.OrigName, strconv.Itoa(r.Seq), r.Annotator, tm(r.Submitted),
@@ -530,7 +548,7 @@ func rowValues(r exportRow, dims []score.Dim) []string {
 	}
 	out = append(out,
 		num(r.Total), r.Grade, statusLabel, r.Reviewer, tm(r.ReviewedAt),
-		strconv.Itoa(r.RejectNum), r.Exceptions, r.RelPath,
+		strconv.Itoa(r.RejectNum), r.Exceptions, r.RelPath, fmt.Sprintf("P%06d", r.SampleNo), r.Group,
 	)
 	return out
 }
@@ -615,7 +633,8 @@ func renderJSON(rows []exportRow) ([]byte, error) {
 			"total": r.Total, "grade": r.Grade, "comment": r.Comment,
 			"status": r.Status, "reviewer": r.Reviewer, "reviewed_at": r.ReviewedAt,
 			"reject_count": r.RejectNum, "exception_reasons": r.Exceptions,
-			"rel_path": r.RelPath,
+			"rel_path": r.RelPath, "sample_id": fmt.Sprintf("P%06d", r.SampleNo), "group": r.Group,
+			"quality_pending": r.QualityPending,
 		})
 	}
 	return json.MarshalIndent(items, "", "  ")
@@ -725,7 +744,7 @@ func (s *Server) runExportJob(jobID int64, userID int64, format string, filtersJ
 		return err
 	}
 	clause, args := f.where()
-	rows, err := s.pool().Query(contextBackground(), exportSelect+" WHERE "+clause+" ORDER BY f.name, i.seq", args...)
+	rows, err := s.pool().Query(contextBackground(), exportSelect+" WHERE "+clause+" ORDER BY f.name, i.seq, i.id", args...)
 	if err != nil {
 		return err
 	}

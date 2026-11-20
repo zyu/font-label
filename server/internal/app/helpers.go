@@ -5,38 +5,86 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/shangyue/font-label/server/internal/platform/httpx"
 	"github.com/shangyue/font-label/server/internal/platform/media"
 	"github.com/shangyue/font-label/server/internal/platform/score"
 )
 
 // ---------- audit ----------
 
+type auditWriter interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func (s *Server) audit(c *gin.Context, action, targetType string, targetID int64, detail map[string]any) {
-	payload, _ := json.Marshal(detail)
-	if payload == nil || string(payload) == "null" {
-		payload = []byte("{}")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+	defer cancel()
+	if err := s.writeAudit(ctx, c, s.pool(), action, targetType, targetID, detail); err != nil {
+		slog.Error("audit insert failed", "action", action, "err", err)
+	}
+}
+
+func (s *Server) insertAudit(c *gin.Context, tx pgx.Tx, action, targetType string, targetID int64, detail map[string]any) error {
+	return s.writeAudit(c.Request.Context(), c, tx, action, targetType, targetID, detail)
+}
+
+func (s *Server) writeAudit(ctx context.Context, c *gin.Context, db auditWriter, action, targetType string, targetID int64, detail map[string]any) error {
+	if detail == nil {
+		detail = make(map[string]any)
+	}
+	detail["request_id"] = httpx.RequestIDOf(c)
+	payload, err := json.Marshal(detail)
+	if err != nil {
+		return err
 	}
 	var actor any
 	if p, ok := currentUser(c); ok {
 		actor = p.ID
+	} else if action == "auth.login" {
+		actor = targetID
 	}
 	var ip any
 	if v := c.ClientIP(); v != "" {
 		ip = v
 	}
-	_, err := s.pool().Exec(c.Request.Context(),
+	_, err = db.Exec(ctx,
 		`INSERT INTO audit_logs (actor_id, action, target_type, target_id, detail, ip, ua)
 		 VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)`,
 		actor, action, targetType, nullInt(targetID), payload, ip, c.Request.UserAgent())
-	if err != nil {
-		slog.Error("audit insert failed", "action", action, "err", err)
+	if err == nil {
+		c.Set("operation_audited", true)
 	}
+	return err
+}
+
+func (s *Server) auditRequest(c *gin.Context) {
+	if !strings.HasPrefix(c.Request.URL.Path, "/api/v1/") {
+		c.Next()
+		return
+	}
+	defer func() {
+		if audited, _ := c.Get("operation_audited"); audited == true && c.Writer.Status() < 400 {
+			return
+		}
+		targetID, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+		path := c.FullPath()
+		if path == "" {
+			path = "unmatched"
+		}
+		s.audit(c, "request."+strings.ToLower(c.Request.Method), "api", targetID, map[string]any{
+			"path": path, "status": c.Writer.Status(),
+		})
+	}()
+	c.Next()
 }
 
 func nullInt(v int64) any {
@@ -109,30 +157,34 @@ func (s *Server) activeRubric(ctx context.Context) (score.Rubric, error) {
 // ---------- image row / dto ----------
 
 type imageRow struct {
-	ID          int64
-	FolderID    int64
-	Folder      string
-	StoredName  string
-	OrigName    string
-	Seq         int
-	Day         time.Time
-	Status      string
-	Width       int
-	Height      int
-	AnnotatorID int64
-	Annotator   string
-	RejectCount int
-	ReviewCount int
-	Kind        string
-	Total       float64
-	Grade       string
-	Comment     string
-	Scores      string
-	DimComments string
-	Exceptions  []string
-	DurationMS  int
-	ClaimedAt   time.Time
-	SubmittedAt time.Time
+	GroupID        int64
+	Group          string
+	SampleNo       int64
+	QualityPending bool
+	ID             int64
+	FolderID       int64
+	Folder         string
+	StoredName     string
+	OrigName       string
+	Seq            int
+	Day            time.Time
+	Status         string
+	Width          int
+	Height         int
+	AnnotatorID    int64
+	Annotator      string
+	RejectCount    int
+	ReviewCount    int
+	Kind           string
+	Total          float64
+	Grade          string
+	Comment        string
+	Scores         string
+	DimComments    string
+	Exceptions     []string
+	DurationMS     int
+	ClaimedAt      time.Time
+	SubmittedAt    time.Time
 }
 
 const imageSelect = `
@@ -144,11 +196,13 @@ SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.st
        COALESCE(i.submitted_at, to_timestamp(0)),
        COALESCE(a.kind,''), COALESCE(a.total,-1), COALESCE(a.grade,''),
        COALESCE(a.comment,''), COALESCE(a.scores::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
-       COALESCE(a.exception_reasons,'{}'), COALESCE(a.duration_ms,0)
+       COALESCE(a.exception_reasons,'{}'), COALESCE(a.duration_ms,0),
+       COALESCE(i.group_id,0), COALESCE(g.name,''), i.sample_no, i.quality_pending
   FROM images i
   JOIN folders f ON f.id = i.folder_id
   LEFT JOIN users u ON u.id = i.annotator_id
-  LEFT JOIN annotations a ON a.image_id = i.id`
+  LEFT JOIN annotations a ON a.image_id = i.id
+  LEFT JOIN annotation_groups g ON g.id=i.group_id`
 
 const imageSelectByID = imageSelect + ` WHERE i.id = $1`
 
@@ -157,7 +211,7 @@ func scanImage(row pgx.Row) (imageRow, error) {
 	err := row.Scan(&r.ID, &r.FolderID, &r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Day, &r.Status,
 		&r.Width, &r.Height, &r.AnnotatorID, &r.Annotator, &r.RejectCount, &r.ReviewCount,
 		&r.ClaimedAt, &r.SubmittedAt, &r.Kind, &r.Total, &r.Grade, &r.Comment, &r.Scores,
-		&r.DimComments, &r.Exceptions, &r.DurationMS)
+		&r.DimComments, &r.Exceptions, &r.DurationMS, &r.GroupID, &r.Group, &r.SampleNo, &r.QualityPending)
 	return r, err
 }
 
@@ -167,7 +221,8 @@ func (s *Server) signURL(id int64, variant string) string {
 
 func (s *Server) toDTO(r imageRow) ImageDTO {
 	d := ImageDTO{
-		ID:          r.ID,
+		ID:      r.ID,
+		GroupID: r.GroupID, Group: r.Group, SampleID: fmt.Sprintf("P%06d", r.SampleNo), QualityPending: r.QualityPending,
 		FolderID:    r.FolderID,
 		Folder:      r.Folder,
 		StoredName:  r.StoredName,

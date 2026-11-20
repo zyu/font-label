@@ -39,19 +39,19 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 	err := s.pool().QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status='unassigned'),
 		       count(*) FILTER (WHERE status='assigned'),
-		       count(*) FILTER (WHERE status='submitted'),
-		       count(*) FILTER (WHERE status='approved'),
-		       count(*) FILTER (WHERE status='rejected'),
-		       count(*) FILTER (WHERE status='excluded'),
+		       count(*) FILTER (WHERE status='submitted' OR quality_pending),
+		       count(*) FILTER (WHERE status='approved' AND NOT quality_pending),
+		       count(*) FILTER (WHERE status='rejected' AND NOT quality_pending),
+		       count(*) FILTER (WHERE status='excluded' AND NOT quality_pending),
 		       count(*)
-		  FROM images`).
+		  FROM images i WHERE `+workflowImageSQL).
 		Scan(&unassigned, &assigned, &submitted, &approved, &rejected, &excluded, &total)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
 	_ = s.pool().QueryRow(ctx, `
-		SELECT (SELECT count(*) FROM images WHERE created_at::date = current_date),
+		SELECT (SELECT count(*) FROM images WHERE group_id IS NULL AND created_at::date = current_date),
 		       (SELECT count(*) FROM images WHERE submitted_at::date = current_date),
 		       (SELECT count(*) FROM reviews WHERE created_at::date = current_date),
 		       (SELECT count(*) FROM reviews WHERE created_at::date = current_date AND action='reject')`).
@@ -90,9 +90,9 @@ func (s *Server) handleStatsAnnotators(c *gin.Context) {
 		      FROM annotations GROUP BY annotator_id
 		), im AS (
 		    SELECT annotator_id,
-		           count(*) FILTER (WHERE status='approved') AS approved,
-		           count(*) FILTER (WHERE status='rejected') AS rejected,
-		           count(*) FILTER (WHERE status='submitted') AS pending,
+		           count(*) FILTER (WHERE status='approved' AND NOT quality_pending) AS approved,
+		           count(*) FILTER (WHERE status='rejected' AND NOT quality_pending) AS rejected,
+		           count(*) FILTER (WHERE status='submitted' OR quality_pending) AS pending,
 		           count(*) FILTER (WHERE status='assigned') AS holding
 		      FROM images WHERE annotator_id IS NOT NULL GROUP BY annotator_id
 		)
@@ -227,7 +227,7 @@ func (s *Server) handleStatsTimeseries(c *gin.Context) {
 	rows, err := s.pool().Query(c.Request.Context(), `
 		SELECT d::date,
 		       (SELECT count(*) FROM images WHERE submitted_at::date = d::date),
-		       (SELECT count(*) FROM images WHERE reviewed_at::date = d::date AND status IN ('approved','excluded')),
+		       (SELECT count(*) FROM images WHERE reviewed_at::date = d::date AND status IN ('approved','excluded') AND NOT quality_pending),
 		       (SELECT count(*) FROM reviews WHERE created_at::date = d::date AND action='reject')
 		  FROM generate_series(current_date - ($1::int - 1), current_date, interval '1 day') AS d
 		 ORDER BY d`, days)
@@ -261,9 +261,9 @@ func (s *Server) handleStatsMe(c *gin.Context) {
 	)
 	err := s.pool().QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE status='assigned'),
-		       count(*) FILTER (WHERE status='rejected'),
-		       count(*) FILTER (WHERE status='approved'),
-		       count(*) FILTER (WHERE status='submitted'),
+		       count(*) FILTER (WHERE status='rejected' AND NOT quality_pending),
+		       count(*) FILTER (WHERE status='approved' AND NOT quality_pending),
+		       count(*) FILTER (WHERE status='submitted' OR quality_pending),
 		       count(*) FILTER (WHERE submitted_at::date = current_date)
 		  FROM images WHERE annotator_id=$1`, me.ID).
 		Scan(&holding, &rejected, &approved, &pending, &submittedToday)

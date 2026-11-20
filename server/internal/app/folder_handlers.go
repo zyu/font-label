@@ -20,13 +20,13 @@ SELECT f.id, f.name, f.note, f.created_at, COALESCE(u.display_name,''), (f.archi
        count(i.id)::int,
        count(i.id) FILTER (WHERE i.status='unassigned')::int,
        count(i.id) FILTER (WHERE i.status='assigned')::int,
-       count(i.id) FILTER (WHERE i.status='submitted')::int,
-       count(i.id) FILTER (WHERE i.status='approved')::int,
-       count(i.id) FILTER (WHERE i.status='rejected')::int,
-       count(i.id) FILTER (WHERE i.status='excluded')::int
+       count(i.id) FILTER (WHERE i.status='submitted' OR i.quality_pending)::int,
+       count(i.id) FILTER (WHERE i.status='approved' AND NOT i.quality_pending)::int,
+       count(i.id) FILTER (WHERE i.status='rejected' AND NOT i.quality_pending)::int,
+       count(i.id) FILTER (WHERE i.status='excluded' AND NOT i.quality_pending)::int
   FROM folders f
   LEFT JOIN users u ON u.id = f.created_by
-  LEFT JOIN images i ON i.folder_id = f.id`
+  LEFT JOIN images i ON i.folder_id = f.id AND ` + workflowImageSQL
 
 func (s *Server) handleListFolders(c *gin.Context) {
 	includeArchived := c.Query("include_archived") == "1"
@@ -34,7 +34,14 @@ func (s *Server) handleListFolders(c *gin.Context) {
 	if !includeArchived {
 		clause = " WHERE f.archived_at IS NULL" + clause
 	}
-	rows, err := s.pool().Query(c.Request.Context(), folderSelect+clause)
+	selectSQL := folderSelect
+	var args []any
+	me := auth.MustCurrent(c)
+	if me.Role == "reviewer" {
+		selectSQL += " AND NOT i.quality_pending AND " + reviewScope("$1", "$2")
+		args = append(args, me.Role, me.ID)
+	}
+	rows, err := s.pool().Query(c.Request.Context(), selectSQL+clause, args...)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -50,6 +57,15 @@ func (s *Server) handleListFolders(c *gin.Context) {
 
 // handleClaimableFolders lists folders with remaining unassigned images.
 func (s *Server) handleClaimableFolders(c *gin.Context) {
+	grouped, err := s.groupedWorkflow(c)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	if grouped {
+		httpx.OK(c, gin.H{"items": []FolderDTO{}})
+		return
+	}
 	rows, err := s.pool().Query(c.Request.Context(),
 		folderSelect+` WHERE f.archived_at IS NULL
 		 GROUP BY f.id, u.display_name
@@ -161,7 +177,8 @@ func (s *Server) handleUpdateFolder(c *gin.Context) {
 		if in.Archived != nil && *in.Archived {
 			var incomplete bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (
-				SELECT 1 FROM images WHERE folder_id=$1 AND status NOT IN ('approved','excluded')
+				SELECT 1 FROM images i WHERE folder_id=$1 AND
+				(quality_pending OR (status NOT IN ('approved','excluded') AND `+workflowImageSQL+`))
 			)`, id).Scan(&incomplete); err != nil {
 				return err
 			}

@@ -36,8 +36,8 @@ function mount(url: string, status = "excluded") {
   qc.setQueryData(["claim-folders"], { items: [] });
   qc.setQueryData(["folders"], { items: [{ id: 9, name: "测试文件夹", submitted: 1 }] });
   qc.setQueryData(["my-counts"], { active: 0, submitted: 1, rejected: 0 });
-  for (const tab of ["approved", "submitted"]) qc.setQueryData(["my-tasks", tab], { items: [image], total: 1 });
-  qc.setQueryData(["review-queue", "exception", 9], { items: [image], total: 1 });
+  for (const tab of ["approved", "submitted"]) qc.setQueryData(["my-tasks", tab, 1], { items: [image], total: 1 });
+  qc.setQueryData(["review-queue", "exception", 9, 1], { items: [image], total: 1 });
   qc.setQueryData(["review-queue-nav"], { items: [image], total: 1 });
   qc.setQueryData(["annotate-queue"], []);
   qc.setQueryData(["image", 1], { image, draft: null, reviews: [] });

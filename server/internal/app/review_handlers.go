@@ -18,7 +18,8 @@ func (s *Server) handleReviewQueue(c *gin.Context) {
 	page, size := httpx.Paging(c)
 
 	clause := "i.status='submitted' AND COALESCE(i.annotator_id,0) <> $1"
-	args := []any{me.ID}
+	args := []any{me.ID, me.Role}
+	clause += " AND " + reviewScope("$2", "$1")
 	if fid := httpx.QueryInt64(c, "folder_id"); fid > 0 {
 		args = append(args, fid)
 		clause += " AND i.folder_id=$" + itoa(len(args))
@@ -41,7 +42,7 @@ func (s *Server) handleReviewQueue(c *gin.Context) {
 	}
 	args = append(args, size, (page-1)*size)
 	rows, err := s.pool().Query(ctx,
-		imageSelect+` WHERE `+clause+` ORDER BY i.submitted_at ASC LIMIT $`+itoa(len(args)-1)+` OFFSET $`+itoa(len(args)),
+		imageSelect+` WHERE `+clause+` ORDER BY i.submitted_at ASC, i.id ASC LIMIT $`+itoa(len(args)-1)+` OFFSET $`+itoa(len(args)),
 		args...)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -160,6 +161,21 @@ func (s *Server) handleReview(c *gin.Context) {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
+	if err := s.requireImageAccess(c, id, annotatorID); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	if me.Role == "admin" {
+		var grouped bool
+		if err := s.pool().QueryRow(ctx, `SELECT group_id IS NOT NULL FROM images WHERE id=$1`, id).Scan(&grouped); err != nil {
+			httpx.Fail(c, err)
+			return
+		}
+		if grouped {
+			httpx.Fail(c, httpx.Forbidden("分组任务只能由同组审核员审核"))
+			return
+		}
+	}
 	if annotatorID == me.ID {
 		httpx.Fail(c, httpx.Forbidden("不能审核自己标注的图片"))
 		return
@@ -204,24 +220,33 @@ func (s *Server) handleReview(c *gin.Context) {
 	}
 
 	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
-		tag, execErr := tx.Exec(ctx,
-			`UPDATE images SET status=$3, reviewed_at=now(),
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(732140, 1)`); err != nil {
+			return err
+		}
+		var groupID int64
+		execErr := tx.QueryRow(ctx,
+			`UPDATE images i SET status=$3, reviewed_at=now(),
 			        review_count = review_count + 1,
 			        reject_count = reject_count + CASE WHEN $2='reject' THEN 1 ELSE 0 END,
 			        updated_at=now()
-			  WHERE id=$1 AND status='submitted' AND COALESCE(annotator_id,0) <> $4`,
-			id, in.Action, newStatus, me.ID)
+			  WHERE id=$1 AND status='submitted' AND COALESCE(annotator_id,0) <> $4
+			    AND `+reviewScope("$5", "$4")+`
+			    AND EXISTS (SELECT 1 FROM users WHERE id=$4 AND role=$5 AND status='active')
+			    AND EXISTS (SELECT 1 FROM annotations a WHERE a.image_id=i.id AND a.id=$6 AND a.version=$7)
+			  RETURNING COALESCE(group_id,0)`,
+			id, in.Action, newStatus, me.ID, me.Role, annID, version).Scan(&groupID)
+		if execErr == pgx.ErrNoRows {
+			return httpx.Conflict("任务状态或审核权限已变更")
+		}
 		if execErr != nil {
 			return execErr
 		}
-		if tag.RowsAffected() == 0 {
-			return httpx.Conflict("该图片已被其他人审核")
-		}
-		if _, err := tx.Exec(ctx,
+		var reviewID int64
+		if err := tx.QueryRow(ctx,
 			`INSERT INTO reviews (image_id, annotation_id, annotation_version, reviewer_id,
 			        action, comment, reason_tags, score_patch, drawings)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`,
-			id, annID, version, me.ID, in.Action, in.Comment, in.ReasonTags, patchJSON, drawingsJSON); err != nil {
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb) RETURNING id`,
+			id, annID, version, me.ID, in.Action, in.Comment, in.ReasonTags, patchJSON, drawingsJSON).Scan(&reviewID); err != nil {
 			return err
 		}
 		if len(in.ScorePatch) > 0 {
@@ -233,15 +258,18 @@ func (s *Server) handleReview(c *gin.Context) {
 				return err
 			}
 		}
-		return nil
+		if groupID != 0 {
+			if err := s.enqueueQualitySample(c, tx, id, reviewID, in.Action); err != nil {
+				return err
+			}
+		}
+		return s.insertAudit(c, tx, "review."+in.Action, "image", id, map[string]any{
+			"comment": in.Comment, "tags": in.ReasonTags, "status": newStatus, "version": version,
+		})
 	})
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	op := "review." + in.Action
-	s.audit(c, op, "image", id, map[string]any{
-		"comment": in.Comment, "tags": in.ReasonTags, "status": newStatus, "version": version,
-	})
 	httpx.OK(c, gin.H{"status": newStatus, "image_id": id, "total": newTotal})
 }

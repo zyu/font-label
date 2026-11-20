@@ -127,7 +127,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		var dupID int64
 		var dupName string
 		if err := s.pool().QueryRow(ctx,
-			`SELECT id, stored_name FROM images WHERE folder_id=$1 AND sha256=$2`, fid, sha).
+			`SELECT id, stored_name FROM images WHERE folder_id=$1 AND sha256=$2 AND group_id IS NULL`, fid, sha).
 			Scan(&dupID, &dupName); err == nil {
 			item.Reason, item.DuplicateOf = "DUPLICATE", dupID
 			item.Message = "已存在同图 " + dupName

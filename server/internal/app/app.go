@@ -31,7 +31,7 @@ func New(cfg config.Config, database *db.DB, store *storage.Store) *Server {
 func (s *Server) Router() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(httpx.RequestID(), httpx.Recover(), httpx.AccessLog(), httpx.CORS())
+	r.Use(httpx.RequestID(), s.auditRequest, httpx.Recover(), httpx.AccessLog(), httpx.CORS())
 	r.GET("/healthz", func(c *gin.Context) {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
@@ -70,6 +70,18 @@ func (s *Server) Router() *gin.Engine {
 	admin.GET("/settings", s.handleGetSettings)
 	admin.PUT("/settings/:key", s.handlePutSetting)
 	admin.GET("/audit-logs", s.handleAuditLogs)
+	admin.GET("/groups", s.handleListGroups)
+	admin.POST("/groups", s.handleSaveGroup)
+	admin.PUT("/groups/:id", s.handleSaveGroup)
+	admin.POST("/groups/dispatch", s.handleDispatchGroups)
+	admin.GET("/quality-policy", s.handleGetQualityPolicy)
+	admin.PUT("/quality-policy", s.handleSetQualityPolicy)
+
+	quality := authed.Group("/quality", auth.Require("quality", "admin"))
+	quality.GET("/samples", s.handleListQualitySamples)
+	quality.GET("/disputes", s.handleListDisputes)
+	quality.POST("/samples/:id", auth.Require("quality"), s.handleCheckSample)
+	quality.POST("/disputes/:id", auth.Require("quality"), s.handleResolveDispute)
 	admin.POST("/exports", s.handleCreateExport)
 
 	// folders (admin + reviewer read; admin writes)
@@ -80,10 +92,12 @@ func (s *Server) Router() *gin.Engine {
 
 	// annotator side
 	work := authed.Group("", auth.Require("annotator", "admin"))
+	work.GET("/work-mode", s.handleWorkMode)
 	work.GET("/claim-folders", s.handleClaimableFolders)
 	work.POST("/claims", s.handleClaim)
 	work.POST("/claims/release", s.handleRelease)
 	work.GET("/claims/my", s.handleMyTasks)
+	work.GET("/claims/my/:id/neighbors", s.handleTaskNeighbors)
 	work.PUT("/images/:id/draft", s.handleSaveDraft)
 	work.GET("/images/:id/draft", s.handleGetDraft)
 	work.POST("/images/:id/submit", s.handleSubmit)

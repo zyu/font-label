@@ -264,7 +264,7 @@ describe("标注交互回归", () => {
     fireEvent.click(screen.getByRole("button", { name: "照片不合格" }));
     await screen.findByRole("dialog", { name: "标记照片不合格" });
     fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
-    expect(await screen.findByText("请至少选择一项照片不合格原因")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("请至少选择一项照片不合格原因")).toBeVisible());
     expect(api.post).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("checkbox", { name: "图片模糊" }));

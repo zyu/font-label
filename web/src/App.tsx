@@ -17,6 +17,10 @@ const UsersPage = lazy(() => import("./pages/admin/Users"));
 const ExportsPage = lazy(() => import("./pages/admin/Exports"));
 const SettingsPage = lazy(() => import("./pages/admin/Settings"));
 
+const GroupsPage = lazy(() => import("./pages/admin/Groups"));
+const AuditLogsPage = lazy(() => import("./pages/admin/AuditLogs"));
+const QualityPage = lazy(() => import("./pages/Quality"));
+
 function Loading() {
   return (
     <div style={{ display: "flex", justifyContent: "center", padding: 80 }}>
@@ -52,7 +56,7 @@ export default function Root() {
     );
   }
 
-  const home = user.role === "annotator" ? "/workbench" : user.role === "reviewer" ? "/review" : "/stats";
+  const home = user.role === "annotator" ? "/workbench" : user.role === "reviewer" ? "/review" : user.role === "quality" ? "/quality" : "/stats";
 
   return (
     <Suspense fallback={<Loading />}>
@@ -69,6 +73,11 @@ export default function Root() {
           <Route path="/admin/users" element={<UsersPage />} />
           <Route path="/admin/exports" element={<ExportsPage />} />
           <Route path="/admin/settings" element={<SettingsPage />} />
+          {user.role === "admin" && <>
+            <Route path="/admin/groups" element={<GroupsPage />} />
+            <Route path="/admin/audit" element={<AuditLogsPage />} />
+          </>}
+          {(user.role === "admin" || user.role === "quality") && <Route path="/quality" element={<QualityPage />} />}
           <Route path="*" element={<Navigate to={home} replace />} />
         </Route>
       </Routes>

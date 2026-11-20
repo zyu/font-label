@@ -11,11 +11,13 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
+  SafetyCertificateOutlined,
+  FileSearchOutlined,
 } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth";
 
-const ROLE_LABEL: Record<string, string> = { admin: "管理员", reviewer: "审核员", annotator: "标注员" };
+const ROLE_LABEL: Record<string, string> = { admin: "管理员", reviewer: "审核员", annotator: "标注员", quality: "质检仲裁员" };
 
 export default function AppLayout() {
   const { user, logout } = useAuth();
@@ -31,12 +33,17 @@ export default function AppLayout() {
     if (role === "reviewer" || role === "admin") {
       list.push({ key: "/review", icon: <AuditOutlined />, label: "审核队列" });
     }
-    list.push({ key: "/stats", icon: <BarChartOutlined />, label: role === "annotator" ? "我的统计" : "统计看板" });
+    if (role === "admin" || role === "quality") {
+      list.push({ key: "/quality", icon: <SafetyCertificateOutlined />, label: "质检与仲裁" });
+    }
+    if (role !== "quality") list.push({ key: "/stats", icon: <BarChartOutlined />, label: role === "annotator" ? "我的统计" : "统计看板" });
     if (role === "admin") {
       list.push(
         { key: "/admin/upload", icon: <CloudUploadOutlined />, label: "上传图片" },
         { key: "/admin/folders", icon: <FolderOpenOutlined />, label: "文件夹" },
-        { key: "/admin/users", icon: <TeamOutlined />, label: "用户管理" },
+        { key: "/admin/users", icon: <UserOutlined />, label: "用户管理" },
+        { key: "/admin/groups", icon: <TeamOutlined />, label: "分组与任务下发" },
+        { key: "/admin/audit", icon: <FileSearchOutlined />, label: "操作日志" },
         { key: "/admin/exports", icon: <DownloadOutlined />, label: "导出结果" },
         { key: "/admin/settings", icon: <SettingOutlined />, label: "评分与设置" },
       );
@@ -68,10 +75,12 @@ export default function AppLayout() {
         <Layout.Header className="app-header">
           <Typography.Text type="secondary">
             {user?.role === "annotator"
-              ? "领取任务 → 左图右评分 → 提交审核；被打回的任务在「标注工作台 · 已驳回」"
+              ? "在工作台完成标注并提交审核"
               : user?.role === "reviewer"
                 ? "逐条审核：通过或填写批注打回，打回任务会回到原标注员"
-                : "管理员：上传 → 分配 → 审核 → 统计 → 导出"}
+                : user?.role === "quality"
+                  ? "处理分配给你的抽检和争议仲裁"
+                  : "管理员：上传 → 分配 → 统计 → 导出"}
           </Typography.Text>
           <Dropdown
             menu={{

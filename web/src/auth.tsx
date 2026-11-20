@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api, getToken, setToken, setUnauthorizedHandler } from "./api/client";
 import type { MeResponse, User } from "./api/types";
 
@@ -14,6 +15,7 @@ interface AuthState {
 const AuthContext = createContext<AuthState>(null as unknown as AuthState);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [ready, setReady] = useState(false);
 
@@ -35,9 +37,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
-    setUnauthorizedHandler(() => setMe(null));
+    setUnauthorizedHandler(() => {
+      queryClient.clear();
+      setMe(null);
+    });
     reload();
-  }, []);
+  }, [queryClient]);
 
   const value = useMemo<AuthState>(
     () => ({
@@ -46,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       async login(username: string, password: string) {
         const res = await api.post<{ access_token: string; user: User }>("/auth/login", { username, password });
+        queryClient.clear();
         setToken(res.access_token);
         const data = await api.get<MeResponse>("/auth/me");
         setMe(data);
@@ -54,11 +60,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout() {
         api.post("/auth/logout").catch(() => undefined);
         setToken("");
+        queryClient.clear();
         setMe(null);
       },
       reload,
     }),
-    [me, ready],
+    [me, ready, queryClient],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

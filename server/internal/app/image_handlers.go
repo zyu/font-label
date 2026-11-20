@@ -25,9 +25,23 @@ func (s *Server) handleListImages(c *gin.Context) {
 		clause += fmt.Sprintf(cond, len(args))
 	}
 
-	if me.Role == "annotator" {
+	switch me.Role {
+	case "annotator":
 		add(" AND i.annotator_id=$%d", me.ID)
-	} else if aid := httpx.QueryInt64(c, "annotator_id"); aid > 0 {
+	case "reviewer":
+		args = append(args, me.Role, me.ID)
+		clause += " AND " + reviewScope("$1", "$2")
+	case "admin":
+		if c.Query("sources") == "1" {
+			clause += " AND i.group_id IS NULL"
+		} else {
+			clause += " AND " + workflowImageSQL
+		}
+	default:
+		httpx.Fail(c, httpx.Forbidden("请在质检或仲裁队列查看任务"))
+		return
+	}
+	if aid := httpx.QueryInt64(c, "annotator_id"); aid > 0 {
 		add(" AND i.annotator_id=$%d", aid)
 	}
 	if fid := httpx.QueryInt64(c, "folder_id"); fid > 0 {
@@ -40,7 +54,7 @@ func (s *Server) handleListImages(c *gin.Context) {
 	if q := strings.TrimSpace(c.Query("q")); q != "" {
 		args = append(args, "%"+q+"%")
 		n := len(args)
-		clause += fmt.Sprintf(" AND (i.stored_name ILIKE $%d OR i.orig_name ILIKE $%d)", n, n)
+		clause += fmt.Sprintf(" AND (i.stored_name ILIKE $%d OR i.orig_name ILIKE $%d 			OR ('P'||lpad(i.sample_no::text,greatest(6,length(i.sample_no::text)),'0')) ILIKE $%d)", n, n, n)
 	}
 	if from := c.Query("from"); from != "" {
 		add(" AND i.created_at >= $%d::date", from)
@@ -81,15 +95,14 @@ func (s *Server) handleGetImage(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	me := auth.MustCurrent(c)
 	ctx := c.Request.Context()
 	row, err := s.imageByID(ctx, id)
 	if err != nil {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
-	if me.Role == "annotator" && row.AnnotatorID != me.ID {
-		httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
+	if err := s.requireImageAccess(c, id, row.AnnotatorID); err != nil {
+		httpx.Fail(c, err)
 		return
 	}
 	dto := s.toDTO(row)
@@ -97,7 +110,7 @@ func (s *Server) handleGetImage(c *gin.Context) {
 	var raw string
 	if row.Status == "assigned" || row.Status == "rejected" {
 		if err := s.pool().QueryRow(ctx,
-			`SELECT payload::text FROM drafts WHERE user_id=$1 AND image_id=$2`, me.ID, id).Scan(&raw); err == nil {
+			`SELECT payload::text FROM drafts WHERE user_id=$1 AND image_id=$2`, auth.MustCurrent(c).ID, id).Scan(&raw); err == nil {
 			_ = json.Unmarshal([]byte(raw), &draft)
 		}
 	}
@@ -115,12 +128,17 @@ func (s *Server) handleGetImage(c *gin.Context) {
 
 func (s *Server) reviewsOf(ctx context.Context, imageID int64) ([]ReviewDTO, error) {
 	rows, err := s.pool().Query(ctx,
-		`SELECT r.id, r.action, COALESCE(r.comment,''), COALESCE(r.reason_tags,'{}'),
-		        COALESCE(u.display_name,''), COALESCE(r.score_patch::text,''), r.created_at, r.annotation_version
-		   FROM reviews r
-		   LEFT JOIN users u ON u.id = r.reviewer_id
-		  WHERE r.image_id = $1
-		  ORDER BY r.created_at DESC`, imageID)
+		`SELECT r.id,r.action,r.comment,r.reason_tags,COALESCE(u.display_name,''),
+		        COALESCE(r.score_patch::text,''),r.created_at,r.annotation_version,'review'
+		   FROM reviews r LEFT JOIN users u ON u.id=r.reviewer_id WHERE r.image_id=$1
+		  UNION ALL
+		 SELECT -d.id,CASE WHEN d.result='return' THEN 'reject' ELSE 'approve' END,
+		        COALESCE(NULLIF(d.note,''),NULLIF(q.note,''),'仲裁已完成'),'{}',
+		        COALESCE(u.display_name,''),'',d.finished_at,r.annotation_version,'arbitration'
+		   FROM quality_disputes d JOIN quality_samples q ON q.id=d.sample_id
+		   JOIN reviews r ON r.id=q.review_id LEFT JOIN users u ON u.id=d.arbiter_id
+		  WHERE q.image_id=$1 AND d.result IS NOT NULL
+		  ORDER BY created_at DESC`, imageID)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +148,7 @@ func (s *Server) reviewsOf(ctx context.Context, imageID int64) ([]ReviewDTO, err
 		var rv ReviewDTO
 		var patch string
 		if err := rows.Scan(&rv.ID, &rv.Action, &rv.Comment, &rv.ReasonTags, &rv.Reviewer,
-			&patch, &rv.CreatedAt, &rv.Version); err != nil {
+			&patch, &rv.CreatedAt, &rv.Version, &rv.Source); err != nil {
 			return nil, err
 		}
 		if patch != "" && patch != "null" {
@@ -152,15 +170,14 @@ func (s *Server) handleHistory(c *gin.Context) {
 		httpx.Fail(c, err)
 		return
 	}
-	me := auth.MustCurrent(c)
 	ctx := c.Request.Context()
 	row, err := s.imageByID(ctx, id)
 	if err != nil {
 		httpx.Fail(c, httpx.NotFound("图片不存在"))
 		return
 	}
-	if me.Role == "annotator" && row.AnnotatorID != me.ID {
-		httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
+	if err := s.requireImageAccess(c, id, row.AnnotatorID); err != nil {
+		httpx.Fail(c, err)
 		return
 	}
 	rows, err := s.pool().Query(ctx,
@@ -215,8 +232,14 @@ func (s *Server) handleDeleteImage(c *gin.Context) {
 		httpx.Fail(c, httpx.Conflict("图片已进入标注流程，不能删除"))
 		return
 	}
-	if _, err := s.pool().Exec(ctx, `DELETE FROM images WHERE id=$1`, id); err != nil {
+	tag, err := s.pool().Exec(ctx, `DELETE FROM images i WHERE i.id=$1 AND i.group_id IS NULL
+		AND i.status='unassigned' AND `+undispatchedSQL, id)
+	if err != nil {
 		httpx.Fail(c, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		httpx.Fail(c, httpx.Conflict("图片已进入标注流程，不能删除"))
 		return
 	}
 	_ = s.store.Remove(relPath)
@@ -224,4 +247,27 @@ func (s *Server) handleDeleteImage(c *gin.Context) {
 	_ = s.store.Remove(preview)
 	s.audit(c, "image.delete", "image", id, nil)
 	httpx.OK(c, gin.H{"ok": true})
+}
+
+func (s *Server) requireImageAccess(c *gin.Context, id, annotatorID int64) error {
+	me := auth.MustCurrent(c)
+	switch me.Role {
+	case "admin":
+		return nil
+	case "annotator":
+		if me.ID == annotatorID {
+			return nil
+		}
+	case "reviewer":
+		var allowed bool
+		err := s.pool().QueryRow(c.Request.Context(), `SELECT `+reviewScope("$2", "$3")+` FROM images i WHERE i.id=$1`,
+			id, me.Role, me.ID).Scan(&allowed)
+		if err != nil {
+			return err
+		}
+		if allowed {
+			return nil
+		}
+	}
+	return httpx.Forbidden("你没有权限查看该任务")
 }

@@ -200,12 +200,29 @@ func (s *Server) handlePutSetting(c *gin.Context) {
 }
 
 func (s *Server) handleAuditLogs(c *gin.Context) {
+	ctx := c.Request.Context()
 	page, size := httpx.Paging(c)
-	rows, err := s.pool().Query(c.Request.Context(),
-		`SELECT a.id, COALESCE(u.display_name,'系统'), a.action, a.target_type,
-		        COALESCE(a.target_id,0), a.detail::text, a.created_at
-		   FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
-		  ORDER BY a.id DESC LIMIT $1 OFFSET $2`, size, (page-1)*size)
+	before := httpx.QueryInt64(c, "before")
+	if before <= 0 {
+		if err := s.pool().QueryRow(ctx, `SELECT COALESCE(max(id),0) FROM audit_logs`).Scan(&before); err != nil {
+			httpx.Fail(c, err)
+			return
+		}
+	}
+	from := ` FROM audit_logs a LEFT JOIN users u ON u.id=a.actor_id
+		WHERE a.id<=$1 AND ($2='' OR strpos(lower(a.action),lower($2))>0)
+		  AND ($3='' OR strpos(lower(COALESCE(u.display_name,'')),lower($3))>0
+		             OR strpos(lower(COALESCE(u.username,'')),lower($3))>0)`
+	args := []any{before, c.Query("action"), c.Query("actor")}
+	var total int
+	if err := s.pool().QueryRow(ctx, "SELECT count(*)"+from, args...).Scan(&total); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	rows, err := s.pool().Query(ctx,
+		`SELECT a.id, COALESCE(u.display_name,'系统/匿名'), COALESCE(u.username,''), a.action, a.target_type,
+		        COALESCE(a.target_id,0), a.detail, a.created_at, COALESCE(host(a.ip),'')`+from+
+			` ORDER BY a.id DESC LIMIT $4 OFFSET $5`, append(args, size, (page-1)*size)...)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
@@ -213,24 +230,21 @@ func (s *Server) handleAuditLogs(c *gin.Context) {
 	defer rows.Close()
 	items := []gin.H{}
 	for rows.Next() {
-		var (
-			id        int64
-			who, act  string
-			typ       string
-			targetID  int64
-			detail    string
-			createdAt any
-		)
-		if err := rows.Scan(&id, &who, &act, &typ, &targetID, &detail, &createdAt); err != nil {
+		var id, targetID int64
+		var actor, username, action, targetType, ip string
+		var detail, createdAt any
+		if err := rows.Scan(&id, &actor, &username, &action, &targetType, &targetID, &detail, &createdAt, &ip); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
-		var dv any
-		_ = json.Unmarshal([]byte(detail), &dv)
 		items = append(items, gin.H{
-			"id": id, "actor": who, "action": act, "target_type": typ,
-			"target_id": targetID, "detail": dv, "created_at": createdAt,
+			"id": id, "actor": actor, "username": username, "action": action, "target_type": targetType,
+			"target_id": targetID, "detail": detail, "created_at": createdAt, "ip": ip,
 		})
 	}
-	httpx.OK(c, gin.H{"items": items, "page": page, "page_size": size})
+	if err := rows.Err(); err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"items": items, "total": total, "before": before, "page": page, "page_size": size})
 }

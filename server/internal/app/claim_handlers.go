@@ -20,9 +20,9 @@ type claimedImage struct {
 
 const claimPickSQL = `
 WITH picked AS (
-    SELECT id FROM images
-     WHERE status = 'unassigned'
-       AND ($1::bigint = 0 OR folder_id = $1)
+    SELECT i.id FROM images i
+     WHERE i.status = 'unassigned' AND i.group_id IS NULL AND ` + undispatchedSQL + `
+       AND ($1::bigint = 0 OR i.folder_id = $1)
      ORDER BY folder_id, seq
      LIMIT $2
      FOR UPDATE SKIP LOCKED
@@ -96,6 +96,16 @@ func (s *Server) handleClaim(c *gin.Context) {
 	var claimed []claimedImage
 	var claimID int64
 	err := s.db.Tx(ctx, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(732140, 1)`); err != nil {
+			return err
+		}
+		var grouped bool
+		if err := tx.QueryRow(ctx, `SELECT `+groupModeSQL).Scan(&grouped); err != nil {
+			return err
+		}
+		if grouped {
+			return httpx.Forbidden("分组任务由管理员下发")
+		}
 		if in.Mode == "folder" {
 			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, in.FolderID); err != nil {
 				return err
@@ -143,7 +153,7 @@ func (s *Server) handleClaim(c *gin.Context) {
 	sort.Slice(claimed, func(i, j int) bool { return claimed[i].ID < claimed[j].ID })
 	var remaining int
 	_ = s.pool().QueryRow(ctx,
-		`SELECT count(*) FROM images WHERE status='unassigned' AND ($1::bigint = 0 OR folder_id=$1)`,
+		`SELECT count(*) FROM images i WHERE status='unassigned' AND `+undispatchedSQL+` AND ($1::bigint = 0 OR folder_id=$1)`,
 		in.FolderID).Scan(&remaining)
 
 	s.audit(c, "claim.grant", "claim", claimID, map[string]any{
@@ -178,7 +188,7 @@ func (s *Server) handleRelease(c *gin.Context) {
 	tag, err := s.pool().Exec(c.Request.Context(),
 		`UPDATE images SET status='unassigned', annotator_id=NULL, claimed_at=NULL,
 		        lock_expires_at=NULL, updated_at=now()
-		  WHERE id = ANY($1) AND annotator_id=$2 AND status='assigned'`,
+		  WHERE id = ANY($1) AND annotator_id=$2 AND status='assigned' AND group_id IS NULL`,
 		in.ImageIDs, me.ID)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -202,11 +212,11 @@ func (s *Server) handleMyTasks(c *gin.Context) {
 	case "active":
 		clause = "i.annotator_id=$1 AND i.status='assigned'"
 	case "rejected":
-		clause = "i.annotator_id=$1 AND i.status='rejected'"
+		clause = "i.annotator_id=$1 AND i.status='rejected' AND NOT i.quality_pending"
 	case "submitted":
-		clause = "i.annotator_id=$1 AND i.status='submitted'"
+		clause = "i.annotator_id=$1 AND (i.status='submitted' OR i.quality_pending)"
 	case "approved":
-		clause = "i.annotator_id=$1 AND i.status IN ('approved','excluded')"
+		clause = "i.annotator_id=$1 AND i.status IN ('approved','excluded') AND NOT i.quality_pending"
 	default:
 		httpx.Fail(c, httpx.BadRequest("status 不合法"))
 		return
@@ -250,50 +260,90 @@ func (s *Server) handleReassign(c *gin.Context) {
 	}
 	var in struct {
 		AnnotatorID *int64 `json:"annotator_id"`
+		Reason      string `json:"reason"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		httpx.Fail(c, httpx.BadRequest("请求体格式错误"))
 		return
 	}
 	ctx := c.Request.Context()
+	ttlHours := s.settingInt(ctx, "lock_ttl_hours", 24)
 	var tag pgconn.CommandTag
-	if in.AnnotatorID == nil {
-		tag, err = s.pool().Exec(ctx,
-			`UPDATE images SET status='unassigned', annotator_id=NULL, claimed_at=NULL,
+	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
+		if err := lockGroupManagement(ctx, tx); err != nil {
+			return err
+		}
+		if in.AnnotatorID == nil {
+			tag, err = tx.Exec(ctx,
+				`UPDATE images i SET status='unassigned', annotator_id=NULL, claimed_at=NULL,
 			        lock_expires_at=NULL, updated_at=now()
-			  WHERE id=$1 AND status IN ('assigned','rejected')`, id)
-	} else {
-		var role, status string
-		if err := s.pool().QueryRow(ctx,
-			`SELECT role, status FROM users WHERE id=$1`, *in.AnnotatorID).Scan(&role, &status); err != nil {
-			httpx.Fail(c, httpx.NotFound("标注员不存在"))
-			return
-		}
-		if status != "active" {
-			httpx.Fail(c, httpx.Conflict("该账号已停用，不能改派"))
-			return
-		}
-		if role == "reviewer" {
-			httpx.Fail(c, httpx.Conflict("审核员不能作为标注员接收任务"))
-			return
-		}
-		tag, err = s.pool().Exec(ctx,
-			`UPDATE images SET annotator_id=$2,
+			  WHERE id=$1 AND group_id IS NULL AND `+undispatchedSQL+` AND status IN ('assigned','rejected')`, id)
+		} else {
+			var role, status string
+			if err := tx.QueryRow(ctx,
+				`SELECT role, status FROM users WHERE id=$1`, *in.AnnotatorID).Scan(&role, &status); err != nil {
+				if err == pgx.ErrNoRows {
+					return httpx.NotFound("标注员不存在")
+				}
+				return err
+			}
+			if status != "active" || (role != "annotator" && role != "admin") {
+				return httpx.Conflict("请选择启用的标注员")
+			}
+			tag, err = tx.Exec(ctx,
+				`UPDATE images i SET annotator_id=$2,
 			        status = CASE WHEN status='unassigned' THEN 'assigned' ELSE status END,
 			        claimed_at = COALESCE(claimed_at, now()),
-			        lock_expires_at = now() + make_interval(hours => $3),
+			        lock_expires_at = CASE WHEN group_id IS NULL THEN now() + make_interval(hours => $3) END,
 			        updated_at=now()
-			  WHERE id=$1 AND status IN ('unassigned','assigned','rejected')`,
-			id, *in.AnnotatorID, s.settingInt(ctx, "lock_ttl_hours", 24))
+			  WHERE id=$1 AND status IN ('unassigned','assigned','rejected') AND NOT quality_pending
+			    AND ((i.group_id IS NULL AND (i.status<>'unassigned' OR NOT `+groupModeSQL+`)) OR (i.group_id IS NOT NULL AND $4='annotator'
+			         AND EXISTS (SELECT 1 FROM annotation_group_members gm WHERE gm.group_id=i.group_id AND gm.user_id=$2)))`,
+				id, *in.AnnotatorID, ttlHours, role)
+		}
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return httpx.Conflict("任务状态不允许改派，或接收人不在该组")
+		}
+		return s.insertAudit(c, tx, "image.reassign", "image", id, map[string]any{
+			"annotator_id": in.AnnotatorID, "reason": in.Reason,
+		})
+	})
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"ok": true})
+}
+
+// Group assignments may contain thousands of images. Resolve the adjacent
+// editable tasks without sending the entire worklist to the browser.
+func (s *Server) handleTaskNeighbors(c *gin.Context) {
+	id, err := httpx.ParamInt64(c, "id")
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	var prev, next, first *int64
+	err = s.pool().QueryRow(c.Request.Context(), `
+		WITH eligible AS NOT MATERIALIZED (
+			SELECT id FROM images WHERE annotator_id=$1 AND group_id IS NOT NULL
+			    AND status IN ('assigned','rejected') AND NOT quality_pending
+		)
+		SELECT (SELECT id FROM eligible WHERE id<$2 ORDER BY id DESC LIMIT 1),
+		       (SELECT id FROM eligible WHERE id>$2 ORDER BY id LIMIT 1),
+		       (SELECT id FROM eligible ORDER BY id LIMIT 1)
+		WHERE EXISTS (SELECT 1 FROM images WHERE id=$2 AND annotator_id=$1 AND group_id IS NOT NULL)`,
+		auth.MustCurrent(c).ID, id).Scan(&prev, &next, &first)
+	if err == pgx.ErrNoRows {
+		httpx.Fail(c, httpx.NotFound("分组任务不存在"))
+		return
 	}
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		httpx.Fail(c, httpx.Conflict("该图片当前状态不允许改派"))
-		return
-	}
-	s.audit(c, "image.reassign", "image", id, map[string]any{"annotator_id": in.AnnotatorID})
-	httpx.OK(c, gin.H{"ok": true})
+	httpx.OK(c, gin.H{"prev_id": prev, "next_id": next, "first_id": first})
 }

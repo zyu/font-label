@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../../api/client";
 import type { User } from "../../api/types";
 
-const ROLE_LABEL: Record<string, string> = { admin: "管理员", reviewer: "审核员", annotator: "标注员" };
+const ROLE_LABEL: Record<string, string> = { admin: "管理员", reviewer: "审核员", annotator: "标注员", quality: "质检仲裁员" };
 
 export default function UsersPage() {
   const qc = useQueryClient();
@@ -86,6 +86,7 @@ export default function UsersPage() {
                     options={[
                       { label: "标注员", value: "annotator" },
                       { label: "审核员", value: "reviewer" },
+                      { label: "质检仲裁员", value: "quality" },
                       { label: "管理员", value: "admin" },
                     ]}
                   />
@@ -123,6 +124,7 @@ export default function UsersPage() {
               options={[
                 { label: "标注员（领取标注）", value: "annotator" },
                 { label: "审核员（审核打回）", value: "reviewer" },
+                { label: "质检仲裁员", value: "quality" },
                 { label: "管理员（全部权限）", value: "admin" },
               ]}
             />

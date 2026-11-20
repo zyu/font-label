@@ -43,7 +43,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (!res.ok) {
-    if (res.status === 401) {
+    if (res.status === 401 && token === getToken()) {
       setToken("");
       onUnauthorized?.();
     }

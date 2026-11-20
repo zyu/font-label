@@ -154,10 +154,10 @@ func TestTrainingZIPScoredSamples(t *testing.T) {
 
 func TestExportStatusFilter(t *testing.T) {
 	for _, tc := range []struct{ status, want string }{
-		{"approved", " i.id > 0 AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"},
-		{"", " i.id > 0 AND i.status = 'approved' AND a.kind = 'score' AND a.total IS NOT NULL"},
-		{"reviewed", " i.id > 0 AND i.status IN ('approved','excluded','rejected')"},
-		{"all", " i.id > 0"},
+		{"approved", " i.id > 0 AND " + workflowImageSQL + " AND i.status = 'approved' AND NOT i.quality_pending AND a.kind = 'score' AND a.total IS NOT NULL"},
+		{"", " i.id > 0 AND " + workflowImageSQL + " AND i.status = 'approved' AND NOT i.quality_pending AND a.kind = 'score' AND a.total IS NOT NULL"},
+		{"reviewed", " i.id > 0 AND " + workflowImageSQL + " AND i.status IN ('approved','excluded','rejected') AND NOT i.quality_pending"},
+		{"all", " i.id > 0 AND " + workflowImageSQL},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			got, _ := (exportFilters{Status: tc.status}).where()

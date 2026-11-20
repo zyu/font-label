@@ -14,25 +14,29 @@ type UserDTO struct {
 }
 
 type ImageDTO struct {
-	ID          int64          `json:"id"`
-	FolderID    int64          `json:"folder_id"`
-	Folder      string         `json:"folder"`
-	StoredName  string         `json:"stored_name"`
-	OrigName    string         `json:"orig_name"`
-	Seq         int            `json:"seq"`
-	Day         string         `json:"day"`
-	Status      string         `json:"status"`
-	Width       int            `json:"width"`
-	Height      int            `json:"height"`
-	AnnotatorID *int64         `json:"annotator_id"`
-	Annotator   string         `json:"annotator"`
-	RejectCount int            `json:"reject_count"`
-	ReviewCount int            `json:"review_count"`
-	Kind        string         `json:"kind"`
-	Total       *float64       `json:"total"`
-	Grade       string         `json:"grade"`
-	Comment     string         `json:"comment"`
-	Scores      map[string]int `json:"scores"`
+	GroupID        int64          `json:"group_id,omitempty"`
+	Group          string         `json:"group,omitempty"`
+	SampleID       string         `json:"sample_id"`
+	QualityPending bool           `json:"quality_pending,omitempty"`
+	ID             int64          `json:"id"`
+	FolderID       int64          `json:"folder_id"`
+	Folder         string         `json:"folder"`
+	StoredName     string         `json:"stored_name"`
+	OrigName       string         `json:"orig_name"`
+	Seq            int            `json:"seq"`
+	Day            string         `json:"day"`
+	Status         string         `json:"status"`
+	Width          int            `json:"width"`
+	Height         int            `json:"height"`
+	AnnotatorID    *int64         `json:"annotator_id"`
+	Annotator      string         `json:"annotator"`
+	RejectCount    int            `json:"reject_count"`
+	ReviewCount    int            `json:"review_count"`
+	Kind           string         `json:"kind"`
+	Total          *float64       `json:"total"`
+	Grade          string         `json:"grade"`
+	Comment        string         `json:"comment"`
+	Scores         map[string]int `json:"scores"`
 	// 五维各自的点评：{"white":"...","black":"..."}
 	DimComments map[string]string `json:"dim_comments"`
 	Exceptions  []string          `json:"exception_reasons"`
@@ -45,6 +49,7 @@ type ImageDTO struct {
 }
 
 type ReviewDTO struct {
+	Source     string    `json:"source"`
 	ID         int64     `json:"id"`
 	Action     string    `json:"action"`
 	Comment    string    `json:"comment"`

@@ -26,7 +26,7 @@ import { useAuth } from "../auth";
 const TABS = [
   { label: "待完成", value: "active" },
   { label: "已驳回", value: "rejected" },
-  { label: "待审核", value: "submitted" },
+  { label: "待审核或质检", value: "submitted" },
   { label: "已通过", value: "approved" },
 ];
 
@@ -37,17 +37,25 @@ export default function WorkbenchPage() {
   const [params, setParams] = useSearchParams();
   const qc = useQueryClient();
   const tab = TABS.some((item) => item.value === params.get("tab")) ? params.get("tab")! : "active";
+  const page = Math.max(1, Number(params.get("page")) || 1);
+  const setPage = (value: number) => setParams(value > 1 ? { tab, page: String(value) } : { tab });
   const setTab = (value: string) => setParams({ tab: value });
+  const mode = useQuery({
+    queryKey: ["work-mode", me?.user?.id],
+    queryFn: () => api.get<{ grouped: boolean }>("/work-mode"),
+  });
+  const grouped = mode.data?.grouped ?? false;
   const [count, setCount] = useState(me?.limits.claim_default_count ?? 10);
 
   const folders = useQuery({
     queryKey: ["claim-folders"],
+    enabled: !grouped,
     queryFn: () => api.get<{ items: FolderDTO[] }>("/claim-folders"),
   });
 
   const tasks = useQuery({
-    queryKey: ["my-tasks", tab],
-    queryFn: () => api.get<Page<ImageDTO>>(`/claims/my?status=${tab}&page_size=100`),
+    queryKey: ["my-tasks", tab, page],
+    queryFn: () => api.get<Page<ImageDTO>>(`/claims/my?status=${tab}&page_size=20&page=${page}`),
   });
 
   const counts = useQuery({
@@ -113,6 +121,7 @@ export default function WorkbenchPage() {
     },
     { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => openTask(row)}>{v}</a> },
     { title: "文件夹", dataIndex: "folder" },
+    ...(grouped ? [{ title: "分组", dataIndex: "group" }] : []),
     {
       title: "分数",
       width: 120,
@@ -130,7 +139,7 @@ export default function WorkbenchPage() {
       width: 110,
       render: (v: string, row: ImageDTO) => (
         <Space size={4}>
-          <Tag color={STATUS_COLOR[v]}>{STATUS_LABEL[v] || v}</Tag>
+          <Tag color={row.quality_pending ? "orange" : STATUS_COLOR[v]}>{row.quality_pending ? "待质检或仲裁" : STATUS_LABEL[v] || v}</Tag>
           {row.reject_count > 0 && <Badge count={row.reject_count} title="被驳回次数" />}
         </Space>
       ),
@@ -151,9 +160,9 @@ export default function WorkbenchPage() {
       render: (_: unknown, row: ImageDTO) => (
         <Space>
           <Button size="small" type="primary" onClick={() => openTask(row)}>
-            {row.status === "assigned" ? "继续标注" : row.status === "rejected" ? "按批注重做" : "查看"}
+            {row.status === "assigned" ? "继续标注" : row.status === "rejected" && !row.quality_pending ? "按批注重做" : "查看"}
           </Button>
-          {row.status === "assigned" && (
+          {row.status === "assigned" && !row.group_id && (
             <Button size="small" danger onClick={() => release.mutate([row.id])}>
               放弃
             </Button>
@@ -165,7 +174,8 @@ export default function WorkbenchPage() {
 
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
-      <Row gutter={14}>
+      {mode.error && <Alert type="error" showIcon title={mode.error.message} />}
+      {!grouped && !mode.isLoading && <Row gutter={14}>
         <Col span={10}>
           <Card size="small" title="按张领取" styles={{ body: { paddingTop: 12 } }}>
             <Space>
@@ -229,7 +239,7 @@ export default function WorkbenchPage() {
             )}
           </Card>
         </Col>
-      </Row>
+      </Row>}
 
       {(counts.data?.rejected ?? 0) > 0 && (
         <Alert
@@ -270,7 +280,7 @@ export default function WorkbenchPage() {
           loading={tasks.isLoading}
           dataSource={tasks.data?.items ?? []}
           columns={columns as never}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
+          pagination={{ current: page, pageSize: 20, total: tasks.data?.total, onChange: setPage, showSizeChanger: false }}
           locale={{ emptyText: <Empty description="这个列表还没有任务" /> }}
         />
       </Card>

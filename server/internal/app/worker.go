@@ -31,37 +31,21 @@ func (s *Server) loop(ctx context.Context, every time.Duration, name string, fn 
 
 // requeueExpired releases claimed-but-unsubmitted images whose lease expired.
 func (s *Server) requeueExpired(ctx context.Context) error {
-	rows, err := s.pool().Query(ctx, `
-		UPDATE images
-		   SET status='unassigned', annotator_id=NULL, claimed_at=NULL,
-		       lock_expires_at=NULL, updated_at=now()
-		 WHERE status='assigned' AND lock_expires_at IS NOT NULL AND lock_expires_at < now()
-		 RETURNING id, COALESCE(annotator_id,0)`)
-	if err != nil {
-		return err
+	tag, err := s.pool().Exec(ctx, `
+		WITH released AS (
+			UPDATE images SET status='unassigned',annotator_id=NULL,claimed_at=NULL,lock_expires_at=NULL,updated_at=now()
+			WHERE status='assigned' AND group_id IS NULL AND lock_expires_at < now()
+			RETURNING id
+		), released_claims AS (
+			UPDATE claims SET released_at=now(),release_reason='timeout'
+			WHERE released_at IS NULL AND image_ids && ARRAY(SELECT id FROM released)
+		)
+		INSERT INTO audit_logs(action,target_type,target_id)
+		SELECT 'claim.timeout','image',id FROM released`)
+	if err == nil && tag.RowsAffected() > 0 {
+		slog.Warn("requeued expired claims", "count", tag.RowsAffected())
 	}
-	defer rows.Close()
-	released := 0
-	owners := map[int64]int{}
-	for rows.Next() {
-		var id, owner int64
-		if err := rows.Scan(&id, &owner); err != nil {
-			return err
-		}
-		released++
-		owners[owner]++
-	}
-	if released > 0 {
-		slog.Warn("requeued expired claims", "count", released)
-		_, _ = s.pool().Exec(ctx,
-			`INSERT INTO audit_logs (actor_id, action, target_type, target_id, detail)
-			 VALUES (NULL,'claim.timeout','image',NULL,$1::jsonb)`,
-			[]byte(`{"count":`+itoa(released)+`}`))
-		_, _ = s.pool().Exec(ctx,
-			`UPDATE claims SET released_at=now(), release_reason='timeout'
-			  WHERE released_at IS NULL AND created_at < now() - interval '1 hour'`)
-	}
-	return rows.Err()
+	return err
 }
 
 func (s *Server) runPendingExports(ctx context.Context) error {
@@ -89,8 +73,8 @@ func (s *Server) runPendingExports(ctx context.Context) error {
 	rows.Close()
 
 	for _, j := range jobs {
-		if _, err := s.pool().Exec(ctx,
-			`UPDATE export_jobs SET status='running' WHERE id=$1`, j.id); err != nil {
+		if tag, err := s.pool().Exec(ctx,
+			`UPDATE export_jobs SET status='running' WHERE id=$1 AND status='pending'`, j.id); err != nil || tag.RowsAffected() == 0 {
 			continue
 		}
 		if err := s.runExportJob(j.id, j.userID, j.format, []byte(j.filters)); err != nil {
