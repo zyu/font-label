@@ -85,8 +85,15 @@ export interface ImageDTO {
   original_url: string;
 }
 
+export interface ReviewQueueItem extends ImageDTO {
+  review_id?: number;
+  reviewed_at?: string;
+  review_result?: "approved" | "rejected" | "excluded";
+  can_review?: boolean;
+}
+
 export interface Review {
-  source?: "review" | "arbitration";
+  source?: "review" | "quality" | "arbitration";
   id: number;
   action: "approve" | "reject";
   comment: string;
@@ -101,6 +108,7 @@ export interface ImageDetail {
   image: ImageDTO;
   reviews: Review[];
   draft: Draft | null;
+  grade_changes?: Record<string, { from: Level; to: Level }>;
 }
 
 export interface Draft {

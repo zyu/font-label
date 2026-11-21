@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -36,6 +37,27 @@ func TestGroupAlignment(t *testing.T) {
 		}
 		return res
 	}
+	acknowledge := func(token, path string, payload map[string]any, expected string) {
+		t.Helper()
+		response := request(token, "POST", path+"/submit", payload, 409)
+		var conflict struct {
+			Error struct {
+				Code    string
+				Details struct{ Confirmation string }
+			}
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &conflict); err != nil ||
+			conflict.Error.Code != "GROUP_KIND_MISMATCH" || conflict.Error.Details.Confirmation == "" ||
+			!strings.Contains(response.Body.String(), expected) {
+			t.Fatalf("expected mixed-kind warning with %q: %s (%v)", expected, response.Body, err)
+		}
+		next := make(map[string]any, len(payload)+1)
+		for key, value := range payload {
+			next[key] = value
+		}
+		next["group_confirmation"] = conflict.Error.Details.Confirmation
+		request(token, "POST", path+"/submit", next, 200)
+	}
 	for index, users := range [][]int64{{a, r1}, {b, r2}} {
 		request(admin, "POST", "/groups", map[string]any{"name": fmt.Sprint(index), "member_ids": users}, 200)
 	}
@@ -69,7 +91,7 @@ func TestGroupAlignment(t *testing.T) {
 	request(first, "POST", x+"/submit", exception, 200)
 	voided := alignmentScore(15, 15, "这份标注后来应当被作废")
 	voided["client_submit_id"] = "8f14e45f-ea4b-4c1e-9a63-2b0f0a1c7d33"
-	request(second, "POST", y+"/submit", voided, 200)
+	acknowledge(second, y, voided, "对方的照片异常备注")
 	request(secondReview, "POST", y+"/review", approve, 200)
 
 	request(admin, "PUT", "/quality-policy", map[string]int{"sample_rate_bps": 10000}, 200)
@@ -152,7 +174,7 @@ func TestGroupAlignment(t *testing.T) {
 		WHERE other.id=$1 AND peer.id<>other.id`, exceptionID).Scan(&sampleID); err != nil {
 		t.Fatal(err)
 	}
-	request(first, "POST", x+"/submit", exception, 200)
+	acknowledge(first, x, exception, "等待质检的对组标注评语")
 	request(firstReview, "POST", x+"/review", approve, 200)
 	request(quality, "POST", fmt.Sprintf("/quality/samples/%d", sampleID), map[string]string{"result": "pass"}, 404)
 

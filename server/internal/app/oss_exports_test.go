@@ -2,7 +2,6 @@ package app
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,12 +28,36 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 	s, router, admin := regressionServer(t)
 	s.cfg.WorkerInAPI = true
 	ctx := context.Background()
-	folder, image := regressionImage(t, s, "approved")
-	_, excluded := regressionImage(t, s, "approved")
-	if _, err := s.pool().Exec(ctx, `INSERT INTO annotations(image_id,annotator_id,kind,grades)
-		VALUES($1,1,'score','{"white":"S","black":"A","variation":"B","structure":"C","control":"D"}'),($2,1,'score','{"white":"A"}')`, image, excluded); err != nil {
+	folder, source := regressionImage(t, s, "unassigned")
+	a1, _ := statsUser(t, s, "annotator", "oss-a")
+	r1, _ := statsUser(t, s, "reviewer", "oss-r")
+	for _, name := range []string{"first", "second", "pending", "invalid", "rejected", "incomplete"} {
+		res := regressionRequest(t, router, admin, "POST", "/groups", map[string]any{"name": name, "member_ids": []int64{a1, r1}})
+		if res.Code != 200 {
+			t.Fatal(res.Body)
+		}
+	}
+	res := regressionRequest(t, router, admin, "POST", "/groups/dispatch", map[string]any{
+		"group_ids": []int64{1, 2, 3, 4, 5, 6}, "image_ids": []int64{source},
+	})
+	if res.Code != 200 {
+		t.Fatal(res.Body)
+	}
+	if _, err := s.pool().Exec(ctx, `
+		UPDATE images SET status=CASE group_id WHEN 4 THEN 'excluded' WHEN 5 THEN 'rejected' ELSE 'approved' END,
+			quality_pending=(group_id=3)
+		WHERE source_image_id=$1`, source); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.pool().Exec(ctx, `
+		INSERT INTO annotations(image_id,annotator_id,kind,grades,dim_comments)
+		SELECT id,annotator_id,CASE WHEN group_id=4 THEN 'exception' ELSE 'score' END,
+			CASE group_id WHEN 4 THEN NULL WHEN 6 THEN '{"white":"A"}'::jsonb ELSE $2::jsonb END,
+			CASE WHEN group_id=2 THEN $3::jsonb || '{"control":"收笔果断"}'::jsonb ELSE $3::jsonb END
+		FROM images WHERE source_image_id=$1`, source, ratingTestGrades(), ratingTestComments()); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := s.store.Write("test.png", []byte("source image")); err != nil {
 		t.Fatal(err)
 	}
@@ -60,36 +83,32 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 			return err
 		}
 		defer z.Close()
-		f, err := z.Open("annotations.json")
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		var records []struct {
-			TaskID int64             `json:"task_id"`
-			Path   string            `json:"image_path"`
-			Grades map[string]string `json:"grades"`
-		}
-		if err := json.NewDecoder(f).Decode(&records); err != nil {
-			return err
-		}
-		if len(records) != 1 || records[0].TaskID != image || records[0].Grades["white"] != "S" {
-			return fmt.Errorf("unexpected annotations: %+v", records)
+		if len(z.File) != 2 {
+			return fmt.Errorf("unexpected ZIP entries: %d", len(z.File))
 		}
 		training, err := z.Open("data.jsonl")
 		if err != nil {
 			return err
 		}
 		defer training.Close()
-		var sample trainRecord
-		if err := json.NewDecoder(training).Decode(&sample); err != nil {
+		decoder := json.NewDecoder(training)
+		var first, second trainRecord
+		if err := decoder.Decode(&first); err != nil {
 			return err
 		}
-		if len(sample.Images) != 1 || sample.Images[0] != records[0].Path || len(sample.Messages) != 2 ||
-			!strings.Contains(sample.Messages[1].Content, "控笔：D") || strings.Contains(sample.Messages[1].Content, "总分") {
-			return fmt.Errorf("unexpected training record: %+v", sample)
+		if err := decoder.Decode(&second); err != nil {
+			return err
 		}
-		img, err := z.Open(records[0].Path)
+		if err := decoder.Decode(&trainRecord{}); err != io.EOF {
+			return fmt.Errorf("unexpected third sample: %v", err)
+		}
+		if len(first.Images) != 1 || len(second.Images) != 1 || first.Images[0] != second.Images[0] ||
+			len(first.Messages) != 2 || len(second.Messages) != 2 ||
+			!strings.Contains(first.Messages[1].Content, "匀（白平衡）：S，间距均匀\n") ||
+			!strings.Contains(second.Messages[1].Content, "控笔：D，收笔果断") {
+			return fmt.Errorf("unexpected training samples: %+v / %+v", first, second)
+		}
+		img, err := z.Open(first.Images[0])
 		if err != nil {
 			return err
 		}
@@ -100,7 +119,7 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 		}
 		return nil
 	}}
-	res := regressionRequest(t, router, admin, "POST", "/exports/oss", body)
+	res = regressionRequest(t, router, admin, "POST", "/exports/oss", body)
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("enqueue: %d %s", res.Code, res.Body)
 	}
@@ -115,25 +134,15 @@ func TestOSSExportPackagesSelectedAnnotationsAndImages(t *testing.T) {
 	if _, err := os.Stat(uploadedFile); !os.IsNotExist(err) {
 		t.Fatalf("temporary ZIP was retained: %v", err)
 	}
-	var packageBytes bytes.Buffer
-	count, err := s.writeOSSArchive(ctx, &packageBytes, exportFilters{Status: "all"})
-	if err != nil || count != 2 {
-		t.Fatalf("archive with reused original has %d records: %v", count, err)
-	}
-	reader, err := zip.NewReader(bytes.NewReader(packageBytes.Bytes()), int64(packageBytes.Len()))
-	if err != nil {
+
+	if _, err := s.pool().Exec(ctx, `INSERT INTO export_jobs(user_id,format,status,filters,destination,object_key,object_url)
+		VALUES (1,'json','done','{}','oss','legacy-export.zip','https://fixture.example/legacy-export.zip')`); err != nil {
 		t.Fatal(err)
 	}
-	imageCount := 0
-	for _, entry := range reader.File {
-		if strings.HasPrefix(entry.Name, "images/") {
-			imageCount++
-		}
-	}
-	if imageCount != count {
-		t.Fatalf("archive has %d image entries for %d rows", imageCount, count)
-	}
 	res = regressionRequest(t, router, admin, "GET", "/exports", nil)
+	if strings.Contains(res.Body.String(), "legacy-export.zip") {
+		t.Fatalf("legacy export listed among training ZIPs: %s", res.Body)
+	}
 	for _, fragment := range []string{`"oss_enabled":true`, `"destination":"oss"`, `"status":"done"`, `"object_url":"https://fixture.oss-cn-chengdu.aliyuncs.com/font-label/exports/test.zip"`} {
 		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), fragment) {
 			t.Fatalf("missing %s in completed history: %d %s", fragment, res.Code, res.Body)
@@ -145,9 +154,9 @@ func TestOSSExportDoesNotUploadWhenImageIsMissing(t *testing.T) {
 	s, router, admin := regressionServer(t)
 	s.cfg.WorkerInAPI = true
 	ctx := context.Background()
-	folder, image := regressionImage(t, s, "excluded")
-	if _, err := s.pool().Exec(ctx, `INSERT INTO annotations(image_id,annotator_id,kind)
-		VALUES ($1,1,'exception')`, image); err != nil {
+	folder, image := regressionImage(t, s, "approved")
+	if _, err := s.pool().Exec(ctx, `INSERT INTO annotations(image_id,annotator_id,kind,grades,dim_comments)
+		VALUES ($1,1,'score',$2,$3)`, image, ratingTestGrades(), ratingTestComments()); err != nil {
 		t.Fatal(err)
 	}
 	s.oss = testOSSUploader{upload: func(_, _ string) error { t.Fatal("incomplete ZIP was uploaded"); return nil }}

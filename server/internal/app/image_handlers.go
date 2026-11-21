@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -113,6 +114,10 @@ func (s *Server) handleGetImage(c *gin.Context) {
 		return
 	}
 	dto := s.toDTO(row)
+	if reviewID := httpx.QueryInt64(c, "review_id"); reviewID > 0 {
+		s.handleReviewedImage(c, tx, dto, reviewID)
+		return
+	}
 	var draft any
 	var raw string
 	if row.Status == "assigned" || row.Status == "rejected" {
@@ -121,20 +126,100 @@ func (s *Server) handleGetImage(c *gin.Context) {
 			_ = json.Unmarshal([]byte(raw), &draft)
 		}
 	}
-	reviewImageID, reviewVersion := id, 0
+	reviewImageID, reviewVersion := id, row.AnnotationVersion
 	if row.ExceptionLockID != 0 {
 		reviewImageID, reviewVersion = row.ExceptionLockID, row.AnnotationVersion
 	}
-	reviews, err := reviewsOf(ctx, tx, reviewImageID, reviewVersion)
+	reviews := []ReviewDTO{}
+	changes := map[string]gradeChange{}
+	if reviewVersion > 0 {
+		reviews, err = reviewsOf(ctx, tx, reviewImageID, reviewVersion)
+		if err != nil {
+			httpx.Fail(c, err)
+			return
+		}
+		if row.ExceptionLockID == 0 && dto.Kind == "score" {
+			var submitted map[string]string
+			err := tx.QueryRow(ctx, `SELECT payload->'grades' FROM annotation_versions WHERE image_id=$1 AND version=$2`, id, reviewVersion).Scan(&submitted)
+			if err != nil && err != pgx.ErrNoRows {
+				httpx.Fail(c, err)
+				return
+			}
+			for key, now := range dto.Grades {
+				if old := submitted[key]; old != "" && old != now {
+					changes[key] = gradeChange{From: old, To: now}
+				}
+			}
+		}
+	}
+	httpx.OK(c, gin.H{
+		"image":         dto,
+		"reviews":       reviews,
+		"draft":         draft,
+		"grade_changes": changes,
+	})
+}
+
+type gradeChange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+func (s *Server) handleReviewedImage(c *gin.Context, tx pgx.Tx, image ImageDTO, reviewID int64) {
+	me := auth.MustCurrent(c)
+	if me.Role != "reviewer" && me.Role != "admin" {
+		httpx.Fail(c, httpx.Forbidden("只有审核员可查看审核快照"))
+		return
+	}
+	type snapshot struct {
+		Kind     string            `json:"kind"`
+		Grades   map[string]string `json:"grades"`
+		Comments map[string]string `json:"dim_comments"`
+		Reasons  []string          `json:"exception_reasons"`
+		Note     string            `json:"exception_note"`
+	}
+	var payload snapshot
+	var patch map[string]string
+	var review ReviewDTO
+	var submittedAt time.Time
+	err := tx.QueryRow(c.Request.Context(), `
+		SELECT COALESCE(v.payload,jsonb_build_object('kind',a.kind,'grades',a.grades,'dim_comments',a.dim_comments,
+			'exception_reasons',a.exception_reasons,'exception_note',a.comment)),
+		       r.id,r.action,r.comment,r.reason_tags,u.display_name,r.created_at,r.annotation_version,r.grade_patch,
+		       COALESCE(v.submitted_at,a.submitted_at)
+		FROM reviews r JOIN images i ON i.id=r.image_id
+		JOIN users u ON u.id=r.reviewer_id
+		LEFT JOIN annotation_versions v ON v.image_id=i.id AND v.version=r.annotation_version
+		LEFT JOIN annotations a ON a.id=r.annotation_id AND a.version=r.annotation_version
+		WHERE r.id=$1 AND i.id=$2 AND r.reviewer_id=$3 AND r.annotation_version>i.voided_through_version
+		  AND (v.image_id IS NOT NULL OR a.id IS NOT NULL)`, reviewID, image.ID, me.ID).
+		Scan(&payload, &review.ID, &review.Action, &review.Comment, &review.ReasonTags, &review.Reviewer, &review.CreatedAt,
+			&review.Version, &patch, &submittedAt)
+	if err == pgx.ErrNoRows {
+		httpx.Fail(c, httpx.NotFound("审核记录不存在"))
+		return
+	}
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
-	httpx.OK(c, gin.H{
-		"image":   dto,
-		"reviews": reviews,
-		"draft":   draft,
-	})
+	review.Source = "review"
+	review.GradePatch = patch
+	image.Kind, image.Comment = payload.Kind, payload.Note
+	image.SubmittedAt = &submittedAt
+	image.QualityPending = false
+	image.Grades, image.DimComments, image.Exceptions = payload.Grades, payload.Comments, payload.Reasons
+	if image.Grades == nil {
+		image.Grades = map[string]string{}
+	}
+	maps.Copy(image.Grades, patch)
+	image.Status = "approved"
+	if review.Action == "reject" {
+		image.Status = "rejected"
+	} else if image.Kind == "exception" {
+		image.Status = "excluded"
+	}
+	httpx.OK(c, gin.H{"image": image, "reviews": []ReviewDTO{review}, "draft": nil})
 }
 
 type imageQueries interface {
@@ -145,21 +230,28 @@ type imageQueries interface {
 func reviewsOf(ctx context.Context, db imageQueries, imageID int64, version int) ([]ReviewDTO, error) {
 	rows, err := db.Query(ctx,
 		`SELECT r.id,r.action,r.comment,r.reason_tags,COALESCE(u.display_name,''),
-		        COALESCE(r.grade_patch::text,''),r.created_at,r.annotation_version,'review'
+		        COALESCE(r.grade_patch::text,''),r.created_at,r.annotation_version,'review' AS source
 		   FROM reviews r JOIN images i ON i.id=r.image_id
 		   LEFT JOIN users u ON u.id=r.reviewer_id
 		  WHERE r.image_id=$1 AND r.annotation_version>i.voided_through_version
 		    AND ($2=0 OR r.annotation_version=$2)
 		  UNION ALL
 		 SELECT -d.id,CASE WHEN d.result='return' THEN 'reject' ELSE 'approve' END,
-		        COALESCE(NULLIF(d.note,''),NULLIF(q.note,''),'仲裁已完成'),'{}',
+		        d.note,'{}',
 		        COALESCE(u.display_name,''),'',d.finished_at,r.annotation_version,'arbitration'
 		   FROM quality_disputes d JOIN quality_samples q ON q.id=d.sample_id
 		   JOIN reviews r ON r.id=q.review_id JOIN images i ON i.id=q.image_id
 		   LEFT JOIN users u ON u.id=d.arbiter_id
 		  WHERE q.image_id=$1 AND d.result IS NOT NULL AND r.annotation_version>i.voided_through_version
 		    AND ($2=0 OR r.annotation_version=$2)
-		  ORDER BY created_at DESC`, imageID, version)
+		  UNION ALL
+		 SELECT -q.id,CASE WHEN q.result='fail' THEN 'reject' ELSE 'approve' END,
+		        q.note,'{}',COALESCE(u.display_name,''),'',q.finished_at,r.annotation_version,'quality'
+		   FROM quality_samples q JOIN reviews r ON r.id=q.review_id AND r.action='approve'
+		   JOIN images i ON i.id=q.image_id LEFT JOIN users u ON u.id=q.inspector_id
+		  WHERE q.image_id=$1 AND q.result IS NOT NULL AND r.annotation_version>i.voided_through_version
+		    AND ($2=0 OR r.annotation_version=$2)
+		  ORDER BY created_at DESC, source ASC, id DESC`, imageID, version)
 	if err != nil {
 		return nil, err
 	}

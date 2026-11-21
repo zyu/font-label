@@ -77,3 +77,19 @@ describe("缩小后的定位", () => {
     }
   });
 });
+
+it("同一张图刷新签名时保持已加载画面和缩放", async () => {
+  const original = "/api/v1/media/1/original?exp=1&sig=old";
+  const latest = "/api/v1/media/1/original?exp=2&sig=new";
+  const view = render(<ImageViewer src={original} alt="作业" resetKey={1} />);
+  const { img } = loadImage(800, 600);
+  fireEvent.click(screen.getByRole("button", { name: "放大" }));
+  const transform = img.style.transform;
+  view.rerender(<ImageViewer src={latest} alt="作业" resetKey={1} />);
+  expect(screen.getByRole("img", { name: "作业" })).toBe(img);
+  expect(img).toHaveAttribute("src", original);
+  expect(img.style.opacity).toBe("1");
+  expect(img.style.transform).toBe(transform);
+  fireEvent.error(img);
+  expect(img).toHaveAttribute("src", latest);
+});

@@ -55,6 +55,38 @@ interface AnnotatorRow {
 }
 
 export default function StatsPage() {
+  const { user } = useAuth();
+  return user?.role === "reviewer" ? <ReviewStats /> : <GeneralStats />;
+}
+
+function ReviewStats() {
+  const { user } = useAuth();
+  const stats = useQuery({
+    queryKey: ["review-stats", user?.id],
+    queryFn: () => api.get<{ pending: number; approved: number; rejected: number; excluded: number }>("/stats/review"),
+    refetchOnMount: "always",
+  });
+  return (
+    <Space orientation="vertical" size={14} className="stats-page">
+      <Typography.Title level={4}>我的审核统计</Typography.Title>
+      {stats.error && <Typography.Text type="danger">{stats.error.message}</Typography.Text>}
+      <Row gutter={[12, 12]}>
+        {([
+          ["待审核", "pending"],
+          ["通过", "approved"],
+          ["打回", "rejected"],
+          ["无效图", "excluded"],
+        ] as const).map(([label, key]) => (
+          <Col key={key} xs={24} sm={12} lg={6}>
+            <Card size="small"><Statistic title={label} value={stats.data?.[key]} loading={stats.isLoading} /></Card>
+          </Col>
+        ))}
+      </Row>
+    </Space>
+  );
+}
+
+function GeneralStats() {
   const [annotatorPage, setAnnotatorPage] = useState(1);
   const [folderPage, setFolderPage] = useState(1);
   const { user, me } = useAuth();
@@ -98,7 +130,7 @@ export default function StatsPage() {
         grade_distribution?: Record<string, Record<string, number>>;
         reject_events: number;
       }>("/stats/me"),
-    enabled: isAnnotator || user?.role === "reviewer",
+    enabled: isAnnotator,
   });
 
   const dimensions = me?.rubric?.dims ?? [];
@@ -212,7 +244,7 @@ export default function StatsPage() {
         </Col>
       </Row>
 
-      {gradeDistribution(user?.role === "reviewer" ? mine.data?.grade_distribution : o?.grade_distribution)}
+      {gradeDistribution(o?.grade_distribution)}
       <Card size="small" title="标注员情况">
         <ListTable
           rowKey="id"

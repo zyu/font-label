@@ -17,7 +17,6 @@ import (
 
 	"github.com/shangyue/font-label/server/internal/platform/auth"
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
-	"github.com/shangyue/font-label/server/internal/platform/score"
 )
 
 type ossExportUploader interface {
@@ -53,7 +52,7 @@ func (s *Server) handleCreateOSSExport(c *gin.Context) {
 		return
 	}
 	if !eligible {
-		httpx.Fail(c, httpx.NotFound("没有符合条件的标注结果"))
+		httpx.Fail(c, httpx.NotFound("没有已走完流程且五维等级、评语齐全的正常标注"))
 		return
 	}
 	key := s.oss.NewObjectKey()
@@ -63,7 +62,7 @@ func (s *Server) handleCreateOSSExport(c *gin.Context) {
 	err = s.db.Tx(ctx, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO export_jobs (user_id,format,filters,destination,object_key,object_url)
-			VALUES ($1,'json',$2,'oss',$3,$4) RETURNING id`, me.ID, input.Filters, key, url).Scan(&id); err != nil {
+			VALUES ($1,'jsonl',$2,'oss',$3,$4) RETURNING id`, me.ID, input.Filters, key, url).Scan(&id); err != nil {
 			return err
 		}
 		return s.insertAudit(c, tx, "export.oss.enqueue", "export", id, map[string]any{
@@ -99,8 +98,15 @@ func validOSSExportFilters(f exportFilters) bool {
 }
 
 func (f exportFilters) ossWhere() (string, []any) {
+	// Historical jobs may carry broader status filters. All new archives contain
+	// only finalized valid ratings with complete training answers.
+	f.Status = "approved"
 	clause, args := f.where()
-	return clause + " AND a.id IS NOT NULL", args
+	return clause + ` AND NOT EXISTS (
+		SELECT FROM unnest(ARRAY['white','black','variation','structure','control']) AS dim(key)
+		WHERE COALESCE(a.grades->>dim.key,'') NOT IN ('S','A','B','C','D')
+		   OR COALESCE(a.dim_comments->>dim.key,'') !~ '[^[:space:]]'
+	)`, args
 }
 
 func (s *Server) runPendingOSSExports(ctx context.Context) error {
@@ -156,7 +162,7 @@ func (s *Server) tryOSSExport(ctx context.Context, id int64) (bool, error) {
 
 	var f exportFilters
 	var key, objectURL string
-	err = conn.QueryRow(ctx, `UPDATE export_jobs SET status='running'
+	err = conn.QueryRow(ctx, `UPDATE export_jobs SET status='running',format='jsonl'
 		WHERE id=$1 AND destination='oss' AND status IN ('pending','running')
 		RETURNING filters,object_key,object_url`, id).Scan(&f, &key, &objectURL)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -225,32 +231,12 @@ type ossArchiveImage struct {
 func (s *Server) writeOSSArchive(ctx context.Context, w io.Writer, f exportFilters) (int, error) {
 	archive := zip.NewWriter(w)
 	defer archive.Close()
-	manifest, err := archive.Create("annotations.json")
-	if err != nil {
-		return 0, err
-	}
-	rubric, err := s.activeRubric(ctx)
-	if err != nil {
-		return 0, err
-	}
-	training, err := os.CreateTemp("", "font-label-training-*.jsonl")
-	if err != nil {
-		return 0, err
-	}
-	defer os.Remove(training.Name())
-	defer training.Close()
-	images, count, err := s.writeOSSManifest(ctx, manifest, training, rubric.Dims, f)
-	if err != nil {
-		return 0, err
-	}
-	if _, err := training.Seek(0, io.SeekStart); err != nil {
-		return 0, err
-	}
 	data, err := archive.Create("data.jsonl")
 	if err != nil {
 		return 0, err
 	}
-	if _, err := io.Copy(data, training); err != nil {
+	images, count, err := s.writeOSSManifest(ctx, data, f)
+	if err != nil {
 		return 0, err
 	}
 	for _, img := range images {
@@ -264,7 +250,7 @@ func (s *Server) writeOSSArchive(ctx context.Context, w io.Writer, f exportFilte
 	return count, archive.Close()
 }
 
-func (s *Server) writeOSSManifest(ctx context.Context, w, training io.Writer, dims []score.Dim, f exportFilters) ([]ossArchiveImage, int, error) {
+func (s *Server) writeOSSManifest(ctx context.Context, training io.Writer, f exportFilters) ([]ossArchiveImage, int, error) {
 	clause, args := f.ossWhere()
 	rows, err := s.pool().Query(ctx, exportSelect+" WHERE "+clause+" ORDER BY f.name,i.seq,i.id", args...)
 	if err != nil {
@@ -272,35 +258,27 @@ func (s *Server) writeOSSManifest(ctx context.Context, w, training io.Writer, di
 	}
 	defer rows.Close()
 
-	if _, err := io.WriteString(w, "[\n"); err != nil {
-		return nil, 0, err
-	}
-	encoder := json.NewEncoder(w)
-	trainingEncoder := json.NewEncoder(training)
+	encoder := json.NewEncoder(training)
+	encoder.SetEscapeHTML(false)
 	var images []ossArchiveImage
+	sharedPaths := map[int64]string{}
 	count := 0
 	for rows.Next() {
 		r, err := scanExportRow(rows)
 		if err != nil {
 			return nil, 0, err
 		}
-		imagePath := trainingImagePath(r)
-		images = append(images, ossArchiveImage{localPath: r.RelPath, archivePath: imagePath})
-		record := exportJSONRecord(r)
-		delete(record, "rel_path")
-		record["task_id"] = r.ID
-		record["image_path"] = imagePath
-		if content, ok := assistantContent(r, dims); ok {
-			if err := trainingEncoder.Encode(trainingRecord(content, imagePath)); err != nil {
-				return nil, 0, err
-			}
+		content, ok := assistantContent(r, trainingDimensions)
+		if !ok {
+			continue
 		}
-		if count > 0 {
-			if _, err := io.WriteString(w, ","); err != nil {
-				return nil, 0, err
-			}
+		imagePath, exists := sharedPaths[r.SourceID]
+		if !exists {
+			imagePath = trainingImagePath(r)
+			sharedPaths[r.SourceID] = imagePath
+			images = append(images, ossArchiveImage{localPath: r.RelPath, archivePath: imagePath})
 		}
-		if err := encoder.Encode(record); err != nil {
+		if err := encoder.Encode(trainingRecord(content, imagePath)); err != nil {
 			return nil, 0, err
 		}
 		count++
@@ -309,8 +287,7 @@ func (s *Server) writeOSSManifest(ctx context.Context, w, training io.Writer, di
 		return nil, 0, err
 	}
 	if count == 0 {
-		return nil, 0, errors.New("没有符合条件的标注结果")
+		return nil, 0, errors.New("没有已走完流程且五维等级、评语齐全的正常标注")
 	}
-	_, err = io.WriteString(w, "]\n")
-	return images, count, err
+	return images, count, nil
 }

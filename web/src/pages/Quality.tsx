@@ -106,6 +106,7 @@ export default function Quality() {
   const tasks = list.data?.items ?? [];
   const open = (record: QualityRecord) => { setSelected(record); setNote(""); };
   const completed = disputes ? selected?.ruling : selected?.quality_result;
+  const canDecide = selected && !admin && !completed && !selected.awaiting_arbiter && !selected.self_arbitrated;
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -139,7 +140,13 @@ export default function Quality() {
       </Card>
 
       <Drawer width="min(980px, 100vw)" title={selected ? `${selected.sample_id} · ${selected.group}` : ""} open={!!selected}
-        onClose={() => setSelected(undefined)}>
+        onClose={() => setSelected(undefined)}
+        footer={canDecide && <Space wrap>
+          {Object.entries(disputes ? rulingLabels : qualityLabels).map(([result, label]) => (
+            <Button key={result} type="primary" danger={["fail", "return"].includes(result)} loading={decide.isPending}
+              onClick={() => decide.mutate({ id: disputes ? selected.dispute_id : selected.id, result })}>{label}</Button>
+          ))}
+        </Space>}>
         {selected && <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <div className="quality-image-frame"><ImageViewer src={selected.original_url} alt={selected.image} resetKey={selected.image_id} /></div>
           <Descriptions bordered size="small" column={1}>
@@ -163,17 +170,8 @@ export default function Quality() {
           </Descriptions>
           {selected.awaiting_arbiter && <Alert type="warning" title="暂无独立仲裁员，已挂起待分配" />}
           {selected.self_arbitrated && <Alert type="warning" title="历史记录由同一人质检和仲裁" />}
-          {!admin && !completed && !selected.awaiting_arbiter && !selected.self_arbitrated && (
-            <>
-              <Input.TextArea aria-label="处理备注" placeholder="处理备注" value={note} onChange={(event) => setNote(event.target.value)} maxLength={1000} />
-              <Space>
-                {Object.entries(disputes ? rulingLabels : qualityLabels).map(([result, label]) => (
-                  <Button key={result} type="primary" danger={["fail", "return"].includes(result)} loading={decide.isPending}
-                    onClick={() => decide.mutate({ id: disputes ? selected.dispute_id : selected.id, result })}>{label}</Button>
-                ))}
-              </Space>
-            </>
-          )}
+          {canDecide && <Input.TextArea aria-label="处理备注" placeholder="处理备注" value={note}
+            onChange={(event) => setNote(event.target.value)} maxLength={1000} />}
         </Space>}
       </Drawer>
     </Space>

@@ -37,8 +37,12 @@ function mount(url: string, status = "excluded") {
   qc.setQueryData(["folders"], { items: [{ id: 9, name: "测试文件夹", submitted: 1 }] });
   qc.setQueryData(["my-counts"], { active: 0, submitted: 1, rejected: 0 });
   for (const tab of ["approved", "submitted"]) qc.setQueryData(["my-tasks", tab, 1], { items: [image], total: 1 });
-  qc.setQueryData(["review-queue", "exception", 9, 1], { items: [image], total: 1 });
-  qc.setQueryData(["review-queue-nav"], { items: [image], total: 1 });
+  qc.setQueryData(["review-queue", "exception", 9, 1, "pending"], { items: [image], total: 1 });
+  qc.setQueryData(["review-queue-nav", "/reviews/queue?kind=exception&folder_id=9&page_size=20"], { items: [image], total: 1 });
+  qc.setQueryData(["review-queue", "", undefined, 1, "reviewed"], {
+    items: [{...image, can_review:false, review_id:54, review_result:"excluded"}],total:1,
+  });
+  qc.setQueryData(["image", 1, "review", "54"], { image: {...image,status:"excluded"}, draft:null,reviews:[] });
   qc.setQueryData(["annotate-queue"], []);
   qc.setQueryData(["image", 1], { image, draft: null, reviews: [] });
   render(<QueryClientProvider client={qc}><MemoryRouter initialEntries={[url]}><CurrentURL /><Routes>
@@ -85,4 +89,14 @@ describe("列表和详情往返", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认照片不合格" }));
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/images/1/review", { action: "approve" }));
   });
+});
+
+it("已审核列表打开只读快照，返回保留页签", async () => {
+  mount("/review?status=reviewed", "submitted");
+  fireEvent.click(screen.getByRole("button", { name: /^查\s*看$/ }));
+  await screen.findByText("已审核记录");
+  expect(screen.queryByRole("button", { name: "确认照片不合格" })).not.toBeInTheDocument();
+  expect(screen.getByTestId("url")).toHaveTextContent("/review/1?review_id=54");
+  fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+  expect(screen.getByTestId("url")).toHaveTextContent("/review?status=reviewed");
 });

@@ -17,15 +17,16 @@ import (
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type submitInput struct {
-	ClientSubmitID   string            `json:"client_submit_id"`
-	Kind             string            `json:"kind"`
-	Grades           map[string]string `json:"grades"`
-	LegacyScores     json.RawMessage   `json:"scores"`
-	DimComments      map[string]string `json:"dim_comments"`
-	LegacyTotal      json.RawMessage   `json:"total_override"`
-	ExceptionReasons []string          `json:"exception_reasons"`
-	ExceptionNote    string            `json:"exception_note"`
-	DurationMS       int               `json:"duration_ms"`
+	GroupConfirmation string            `json:"group_confirmation"`
+	ClientSubmitID    string            `json:"client_submit_id"`
+	Kind              string            `json:"kind"`
+	Grades            map[string]string `json:"grades"`
+	LegacyScores      json.RawMessage   `json:"scores"`
+	DimComments       map[string]string `json:"dim_comments"`
+	LegacyTotal       json.RawMessage   `json:"total_override"`
+	ExceptionReasons  []string          `json:"exception_reasons"`
+	ExceptionNote     string            `json:"exception_note"`
+	DurationMS        int               `json:"duration_ms"`
 }
 
 func (s *Server) handleSaveDraft(c *gin.Context) {
@@ -283,6 +284,11 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		if pending {
 			return httpx.Conflict("该任务正在质检或仲裁")
 		}
+		if sourceID != 0 {
+			if err := checkGroupKinds(ctx, tx, sourceID, id, kind, in.GroupConfirmation); err != nil {
+				return err
+			}
+		}
 		if sourceID != 0 && kind == "score" {
 			if err := checkGroupGrades(ctx, tx, sourceID, id, rubric, in.Grades, dimComments); err != nil {
 				return err
@@ -328,7 +334,11 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		if _, err := tx.Exec(ctx, `DELETE FROM drafts WHERE user_id=$1 AND image_id=$2`, me.ID, id); err != nil {
 			return err
 		}
-		return s.insertAudit(c, tx, op, "image", id, map[string]any{"kind": kind, "version": newVersion})
+		detail := map[string]any{"kind": kind, "version": newVersion}
+		if in.GroupConfirmation != "" {
+			detail["group_confirmation"] = in.GroupConfirmation
+		}
+		return s.insertAudit(c, tx, op, "image", id, detail)
 	})
 	if err != nil {
 		httpx.Fail(c, err)

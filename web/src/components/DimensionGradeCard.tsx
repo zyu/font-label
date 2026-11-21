@@ -8,6 +8,7 @@ import { LEVELS, commentChoices, levelGuide, type Level } from "../lib/annotatio
 interface Props {
   dim: Dim;
   grade?: Level;
+  reviewChange?: { from: Level; to: Level };
   comment: DimCommentState;
   templates: unknown;
   minLength: number;
@@ -25,7 +26,7 @@ const gradeMovement: Record<string, number | undefined> = { ArrowLeft: -1, Arrow
 const shortNames: Record<string, string> = { white: "匀", black: "稳" };
 
 export default function DimensionGradeCard({
-  dim, grade, comment, templates, minLength, maxLength, editable, frozen, active, invalid,
+  dim, grade, reviewChange, comment, templates, minLength, maxLength, editable, frozen, active, invalid,
   onActivate, onPick, onComment,
 }: Props) {
   const id = useId();
@@ -69,6 +70,7 @@ export default function DimensionGradeCard({
         </div>
         {editable && <span className="dimension-required">评语必填</span>}
       </div>
+      {reviewChange && <span className="dimension-review-change">审核修正 {reviewChange.from} → {reviewChange.to}</span>}
       {guide && (
         <div className="dimension-guide" aria-live="polite">
           <strong>{grade} {guide.title}</strong>

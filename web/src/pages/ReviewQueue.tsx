@@ -1,3 +1,4 @@
+import MediaImage from "../components/MediaImage";
 import { useAuth } from "../auth";
 import RatingSummary from "../components/RatingSummary";
 import ListTable from "../components/ListTable";
@@ -5,13 +6,14 @@ import { Badge, Button, Card, Empty, Segmented, Select, Space, Tag, Typography }
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import { STATUS_LABEL, type FolderDTO, type ImageDTO, type Page } from "../api/types";
+import { STATUS_LABEL, type FolderDTO, type ReviewQueueItem, type Page } from "../api/types";
 
 export default function ReviewQueuePage() {
   const { me } = useAuth();
   const nav = useNavigate();
   const location = useLocation();
   const [params, setParams] = useSearchParams();
+  const status = params.get("status") ?? "pending";
   const kind = params.get("kind") ?? "";
   const folderId = Number(params.get("folder_id")) || undefined;
   const page = Math.max(1, Number(params.get("page")) || 1);
@@ -21,7 +23,19 @@ export default function ReviewQueuePage() {
     if (value) next.set(key, value); else next.delete(key);
     return next;
   });
-  const openReview = (id: number) => nav(`/review/${id}`, { state: { returnTo: `${location.pathname}${location.search}` } });
+  const openReview = (row: ReviewQueueItem) => {
+    const snapshot = row.can_review === false && row.review_id ? `?review_id=${row.review_id}` : "";
+    nav(`/review/${row.id}${snapshot}`, { state: { returnTo: `${location.pathname}${location.search}` } });
+  };
+  function changeTab(value: string) {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    next.delete("kind");
+    next.delete("status");
+    if (value === "score" || value === "exception") next.set("kind", value);
+    else if (value === "reviewed" || value === "all") next.set("status", value);
+    setParams(next);
+  }
 
   const folders = useQuery({
     queryKey: ["folders"],
@@ -29,40 +43,41 @@ export default function ReviewQueuePage() {
   });
 
   const queue = useQuery({
-    queryKey: ["review-queue", kind, folderId, page],
+    queryKey: ["review-queue", kind, folderId, page, status],
     queryFn: () => {
       const qs = new URLSearchParams({ page_size: "20", page: String(page) });
+      if (status !== "pending") qs.set("status", status);
       if (kind) qs.set("kind", kind);
       if (folderId) qs.set("folder_id", String(folderId));
-      return api.get<Page<ImageDTO>>(`/reviews/queue?${qs.toString()}`);
+      return api.get<Page<ReviewQueueItem>>(`/reviews/queue?${qs.toString()}`);
     },
   });
 
   const items = queue.data?.items ?? [];
-  const first = items[0];
+  const first = items.find((item) => item.can_review ?? item.status === "submitted");
 
   const columns = [
     {
       title: "图片",
       width: 80,
-      render: (_: unknown, row: ImageDTO) => (
-        <img className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => openReview(row.id)} />
+      render: (_: unknown, row: ReviewQueueItem) => (
+        <MediaImage className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => openReview(row)} />
       ),
     },
-    { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => openReview(row.id)}>{v}</a> },
+    { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ReviewQueueItem) => <a onClick={() => openReview(row)}>{v}</a> },
     { title: "文件夹", dataIndex: "folder" },
     { title: "分组", dataIndex: "group", render: (group?: string) => group || "—" },
     { title: "标注员", dataIndex: "annotator" },
     {
       title: "类型",
       width: 100,
-      render: (_: unknown, row: ImageDTO) =>
+      render: (_: unknown, row: ReviewQueueItem) =>
         row.kind === "exception" ? <Tag color="orange">照片不合格</Tag> : <Tag color="blue">评级</Tag>,
     },
     {
       title: "五维等级",
       width: 110,
-      render: (_: unknown, row: ImageDTO) => <RatingSummary dimensions={me?.rubric.dims ?? []} grades={row.grades} />,
+      render: (_: unknown, row: ReviewQueueItem) => <RatingSummary dimensions={me?.rubric.dims ?? []} grades={row.grades} />,
     },
     {
       title: "提交时间",
@@ -71,11 +86,24 @@ export default function ReviewQueuePage() {
       render: (v: string) => (v ? new Date(v).toLocaleString("zh-CN") : "-"),
     },
     {
+      title: "审核结果",
+      width: 130,
+      render: (_: unknown, row: ReviewQueueItem) => row.can_review ?? row.status === "submitted"
+        ? <Tag color="orange">待审核</Tag>
+        : <Tag>{STATUS_LABEL[row.review_result ?? row.status]}</Tag>,
+    },
+    {
+      title: "审核时间",
+      width: 170,
+      dataIndex: "reviewed_at",
+      render: (value?: string) => value ? new Date(value).toLocaleString("zh-CN") : "—",
+    },
+    {
       title: "操作",
       width: 140,
-      render: (_: unknown, row: ImageDTO) => (
-        <Button type="primary" size="small" onClick={() => openReview(row.id)}>
-          审核
+      render: (_: unknown, row: ReviewQueueItem) => (
+        <Button type="primary" size="small" onClick={() => openReview(row)}>
+          {(row.can_review ?? row.status === "submitted") ? "审核" : "查看"}
         </Button>
       ),
     },
@@ -88,12 +116,14 @@ export default function ReviewQueuePage() {
           <Space>
             <Typography.Text type="secondary">类型</Typography.Text>
             <Segmented
-              value={kind}
-              onChange={(v) => setFilter("kind", String(v))}
+              value={status === "pending" ? kind || "pending" : status}
+              onChange={changeTab}
               options={[
-                { label: "全部", value: "" },
-                { label: "评级", value: "score" },
-                { label: "照片不合格", value: "exception" },
+                { label: "待审核", value: "pending" },
+                { label: "待审核 · 评级", value: "score" },
+                { label: "待审核 · 照片不合格", value: "exception" },
+                { label: "已审核", value: "reviewed" },
+                { label: "全部", value: "all" },
               ]}
             />
           </Space>
@@ -109,13 +139,13 @@ export default function ReviewQueuePage() {
             />
           </Space>
           <Badge count={queue.data?.total ?? 0} showZero color="#2b5cff" />
-          <Button type="primary" disabled={!first} onClick={() => first && openReview(first.id)}>
+          <Button type="primary" disabled={!first} onClick={() => first && openReview(first)}>
             开始逐条审核
           </Button>
         </Space>
       </Card>
 
-      <Card size="small" title={`待审核队列（${queue.data?.total ?? 0}）`}>
+      <Card size="small" title={`${status === "reviewed" ? "已审核" : status === "all" ? "全部审核任务" : "待审核队列"}（${queue.data?.total ?? 0}）`}>
         <ListTable
           rowKey="id"
           size="middle"
@@ -123,7 +153,7 @@ export default function ReviewQueuePage() {
           dataSource={items}
           columns={columns as never}
           pagination={{ current: page, total: queue.data?.total, pageSize: 20, showSizeChanger: false, onChange: (value) => setFilter("page", value > 1 ? String(value) : "") }}
-          locale={{ emptyText: <Empty description="队列空了，所有提交都审完了" /> }}
+          locale={{ emptyText: <Empty description={status === "pending" ? "当前没有待审核任务" : "当前没有符合条件的记录"} /> }}
         />
       </Card>
 

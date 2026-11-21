@@ -33,7 +33,6 @@ interface Job {
 
 export default function ExportsPage() {
   const [page, setPage] = useState(1);
-  const [status, setStatus] = useState("approved");
   const [folders, setFolders] = useState<number[]>([]);
   const [annotators, setAnnotators] = useState<number[]>([]);
   const [range, setRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
@@ -57,7 +56,7 @@ export default function ExportsPage() {
   const filters = {
     folders,
     annotators,
-    status,
+    status: "approved",
     date_field: dateField,
     from: range?.[0]?.format("YYYY-MM-DD") ?? "",
     to: range?.[1]?.format("YYYY-MM-DD") ?? "",
@@ -111,20 +110,6 @@ export default function ExportsPage() {
               />
             </Space>
           </Form.Item>
-          <Form.Item label="任务状态" style={{ marginBottom: 12 }}>
-            <Space wrap size={12}>
-              <Segmented
-                value={status}
-                onChange={(v) => setStatus(String(v))}
-                options={[
-                  { label: "仅已通过", value: "approved" },
-                  { label: "已审核（含打回）", value: "reviewed" },
-                  { label: "全部", value: "all" },
-                ]}
-              />
-
-            </Space>
-          </Form.Item>
         </Form>
         <Space wrap size={10} style={{ marginBottom: 12 }}>
           <Button icon={<CloudUploadOutlined />} loading={uploading}
@@ -133,14 +118,13 @@ export default function ExportsPage() {
           </Button>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {jobs.data?.oss_enabled
-              ? "按当前筛选打包标注 JSON 和原图，后台上传 ZIP。"
+              ? "按当前筛选打包训练集和原图，后台上传 ZIP。"
               : jobs.data ? "OSS 上传尚未启用，请检查服务端配置。" : "正在检查 OSS 配置"}
           </Typography.Text>
         </Space>
         <br />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          ZIP 包含标注 JSON、原图和训练集 JSONL。训练集收录审核通过且五维等级齐全的正常标注。
-          「已审核（含打回）」和「全部」也可包含异常记录。
+          ZIP 仅包含 data.jsonl 和原图，只收录已走完流程且五维等级、评语齐全的正常标注。
         </Typography.Text>
       </Card>
 

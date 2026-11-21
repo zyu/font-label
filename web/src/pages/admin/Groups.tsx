@@ -1,3 +1,4 @@
+import MediaImage from "../../components/MediaImage";
 import ListTable from "../../components/ListTable";
 import { useState } from "react";
 import { Alert, Button, Card, Form, Input, Modal, Segmented, Select, Space, Switch, Tag, Typography, message } from "antd";
@@ -134,7 +135,7 @@ export default function Groups() {
               rowSelection={{ selectedRowKeys: selected, preserveSelectedRowKeys: true, onChange: (keys) => setSelected(keys.map(Number)) }}
               pagination={{ current: page, pageSize: 20, total: sources.data?.total, onChange: setPage, showSizeChanger: false }}
               columns={[
-                { title: "图片", width: 85, render: (_, row) => <img className="thumb" src={row.thumb_url} alt={row.orig_name} /> },
+                { title: "图片", width: 85, render: (_, row) => <MediaImage className="thumb" src={row.thumb_url} alt={row.orig_name} /> },
                 { title: "样本编号", dataIndex: "sample_id" },
                 { title: "文件名", dataIndex: "orig_name" },
               ]}

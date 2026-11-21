@@ -24,7 +24,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import type { Draft, ImageDTO, ImageDetail, Page, Review } from "../api/types";
+import type { Draft, ImageDTO, ImageDetail, Page } from "../api/types";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
 import DimensionGradeCard from "../components/DimensionGradeCard";
@@ -46,6 +46,21 @@ interface GradeDifference {
   peer_comment: string;
   peer_group: string;
 }
+
+interface GroupKindConflict {
+  confirmation: string;
+  peers: {
+    task_id: number;
+    group: string;
+    kind: "score" | "exception";
+    grades: Record<string, Level>;
+    dim_comments: Record<string, string>;
+    exception_reasons: string[];
+    exception_note: string;
+  }[];
+}
+
+const feedbackLabel = { review: "审核批注", quality: "质检批注", arbitration: "仲裁批注" };
 
 const SHORTCUTS = [
   ["Ctrl / ⌘ + Enter", "提交并下一张"],
@@ -80,6 +95,7 @@ function AnnotationEditor({ id }: { id: number }) {
   const cardList = useRef<HTMLDivElement>(null);
   const [excOpen, setExcOpen] = useState(false);
   const [differences, setDifferences] = useState<GradeDifference[]>([]);
+  const [kindConflict, setKindConflict] = useState<{ details: GroupKindConflict; payload: Record<string, unknown> }>();
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
   const [initialized, setInitialized] = useState<string | null>(null);
@@ -133,6 +149,7 @@ function AnnotationEditor({ id }: { id: number }) {
     setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
     setDifferences([]);
+    setKindConflict(undefined);
     if (!canEdit) setExcOpen(false);
     setInitialized(`${image.id}:${image.status}`);
     startedAt.current = Date.now();
@@ -231,7 +248,14 @@ function AnnotationEditor({ id }: { id: number }) {
         nav(returnTo);
       }
     },
-    onError: (e) => {
+    onError: (e, payload) => {
+      if (e instanceof ApiError && e.code === "GROUP_KIND_MISMATCH") {
+        const details = e.details as GroupKindConflict | undefined;
+        if (details?.confirmation && details.peers?.length) {
+          setKindConflict({ details, payload });
+          return;
+        }
+      }
       if (e instanceof ApiError && e.code === "GRADE_MISMATCH") {
         const details = e.details as { differences?: GradeDifference[] } | undefined;
         if (details?.differences?.length) {
@@ -256,7 +280,7 @@ function AnnotationEditor({ id }: { id: number }) {
   }
 
   function doSubmit() {
-    if (!canEdit || excOpen || differences.length > 0 || submitting.current) return;
+    if (!canEdit || excOpen || (differences.length > 0 || kindConflict) || submitting.current) return;
     if (firstInvalid) {
       const key = firstInvalid.key;
       const commentEnabled = grades[key] !== undefined;
@@ -312,7 +336,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen || differences.length > 0) return;
+      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen || differences.length > 0 || kindConflict) return;
       const el = e.target as HTMLElement;
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -351,12 +375,16 @@ function AnnotationEditor({ id }: { id: number }) {
       </div>
     );
   }
-  if (detail.error || !image) {
+  if (!image) {
     return <Empty description="图片不存在或已被回收" />;
   }
 
   const reviews = detail.data?.reviews ?? [];
-  const lastReject: Review | undefined = reviews.find((r) => r.action === "reject");
+  const latestReview = reviews[0];
+  const feedback = latestReview && (latestReview.comment?.trim() || latestReview.reason_tags?.length) ? latestReview : undefined;
+  const exceptionApproval = reviews.find((review) => review.source === "review" && review.action === "approve");
+  const exceptionReviews = [latestReview, exceptionApproval === latestReview ? undefined : exceptionApproval]
+    .filter((review) => review !== undefined);
 
   return (
     <div className="annotate-shell">
@@ -409,31 +437,31 @@ function AnnotationEditor({ id }: { id: number }) {
               </Space>
             } />
           )}
-          {exceptionLocked && reviews.map((review) => (
+          {exceptionLocked && exceptionReviews.map((review) => (
             <Alert
-              key={review.id}
+              key={`${review.source}:${review.id}`}
               type={review.action === "approve" ? "success" : "warning"}
               style={{ marginBottom: 12 }}
-              title={`${review.source === "arbitration" ? "仲裁" : "审核"}${review.action === "approve" ? "通过" : "退回"} · ${review.reviewer}`}
+              title={`${feedbackLabel[review.source ?? "review"].replace("批注", "")}${review.action === "approve" ? "通过" : "退回"} · ${review.reviewer}`}
               description={
                 <Space orientation="vertical" size={4}>
                   <span>{new Date(review.created_at).toLocaleString("zh-CN")}</span>
-                  {review.comment && <span>{review.comment}</span>}
-                  {review.reason_tags?.length > 0 && <span>{review.reason_tags.join("、")}</span>}
+                  {review === feedback && review.comment && <span>{review.comment}</span>}
+                  {review === feedback && review.reason_tags?.length > 0 && <span>{review.reason_tags.join("、")}</span>}
                 </Space>
               }
             />
           ))}
-          {!exceptionLocked && lastReject && (
+          {!exceptionLocked && feedback && (
             <div className="reject-card">
               <div className="who">
-                {lastReject.source === "arbitration" ? "仲裁批注" : "审核批注"} · {lastReject.reviewer} ·{" "}
-                {new Date(lastReject.created_at).toLocaleString("zh-CN")}
+                {feedbackLabel[feedback.source ?? "review"]} · {feedback.reviewer} ·{" "}
+                {new Date(feedback.created_at).toLocaleString("zh-CN")}
               </div>
-              <div className="body">{lastReject.comment}</div>
-              {lastReject.reason_tags?.length > 0 && (
+              <div className="body">{feedback.comment}</div>
+              {feedback.reason_tags?.length > 0 && (
                 <Space size={4} wrap style={{ marginTop: 8 }}>
-                  {lastReject.reason_tags.map((t) => (
+                  {feedback.reason_tags.map((t) => (
                     <Tag key={t} color="red">
                       {t}
                     </Tag>
@@ -478,7 +506,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
           <div className="dimension-card-list" ref={cardList} aria-disabled={excOpen || submit.isPending}>
             {rubric.dims.map((dim, index) => (
-              <DimensionGradeCard key={dim.key} dim={dim} grade={grades[dim.key]}
+              <DimensionGradeCard key={dim.key} dim={dim} grade={grades[dim.key]} reviewChange={detail.data?.grade_changes?.[dim.key]}
                 comment={commentStates[index]} templates={me?.comment_templates} minLength={dimMin} maxLength={dimMax}
                 editable={canEdit} frozen={excOpen || submit.isPending}
                 active={canEdit && activeDim === dim.key} invalid={invalidDim === dim.key}
@@ -530,7 +558,7 @@ function AnnotationEditor({ id }: { id: number }) {
       </div>
 
       <ExceptionPanel
-        open={canEdit && excOpen}
+        open={canEdit && excOpen && !kindConflict}
         reasons={reasons}
         loading={submit.isPending}
         onCancel={() => setExcOpen(false)}
@@ -569,6 +597,36 @@ function AnnotationEditor({ id }: { id: number }) {
             { title: "档差", width: 100, render: (_, row) => `相差 ${row.gap} 档` },
           ]}
         />
+      </Modal>
+
+      <Modal
+        open={canEdit && !!kindConflict}
+        title="组间有效性判定不同"
+        okText="确认并提交"
+        cancelText="返回修改"
+        confirmLoading={submit.isPending}
+        onCancel={() => setKindConflict(undefined)}
+        onOk={() => {
+          if (!kindConflict) return;
+          const { details, payload } = kindConflict;
+          setKindConflict(undefined);
+          setExcOpen(false);
+          send({ ...payload, group_confirmation: details.confirmation });
+        }}
+      >
+        <Alert type="warning" showIcon title={kindConflict?.payload.kind === "exception"
+          ? "本图将被判为无效。异常审核通过后，对方标注将作废。"
+          : "对组已提交异常。若异常审核通过，本组的评级将作废。"} />
+        {kindConflict?.details.peers.map((peer) => (
+          <Card key={peer.task_id} size="small" title={peer.group} style={{ marginTop: 12 }}>
+            {peer.kind === "score" ? rubric.dims.map(({ key, label }) => (
+              <div key={key}><strong>{label}</strong> <Tag>{peer.grades[key] ?? "—"}</Tag>{peer.dim_comments[key]}</div>
+            )) : <>
+              <div>{peer.exception_reasons.map((key) => exceptionReasonLabel(key, reasons)).join("、")}</div>
+              {peer.exception_note && <div>{peer.exception_note}</div>}
+            </>}
+          </Card>
+        ))}
       </Modal>
 
       <Modal open={helpOpen} footer={null} onCancel={() => setHelpOpen(false)} title="快捷键">

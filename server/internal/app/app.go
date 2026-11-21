@@ -114,6 +114,7 @@ func (s *Server) Router() *gin.Engine {
 	// review
 	rev := authed.Group("", auth.Require("reviewer", "admin"))
 	rev.GET("/reviews/queue", s.handleReviewQueue)
+	rev.GET("/stats/review", s.handleReviewStats)
 	rev.GET("/reviews/mine", s.handleMyReviews)
 	rev.GET("/reviews/reasons", s.handleReviewReasons)
 	rev.POST("/images/:id/review", s.handleReview)

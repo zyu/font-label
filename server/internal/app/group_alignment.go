@@ -2,7 +2,11 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
@@ -85,5 +89,61 @@ func checkGroupGrades(ctx context.Context, tx pgx.Tx, sourceID, taskID int64, ru
 	}
 	conflict := httpx.New(http.StatusConflict, "GRADE_MISMATCH", "组间等级差异")
 	conflict.Details = map[string]any{"differences": differences}
+	return conflict
+}
+
+// checkGroupKinds requires explicit acceptance of the exact peer submissions
+// seen in the warning. A new peer submission invalidates an earlier acceptance.
+func checkGroupKinds(ctx context.Context, tx pgx.Tx, sourceID, taskID int64, kind, accepted string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT peer.id,a.version,g.name,a.kind,COALESCE(a.grades,'{}'),
+		       a.dim_comments,a.exception_reasons,a.comment
+		FROM images peer
+		JOIN annotation_groups g ON g.id=peer.group_id
+		JOIN annotations a ON a.image_id=peer.id AND a.version>peer.voided_through_version
+		WHERE peer.source_image_id=$1 AND peer.id<>$2
+		  AND peer.status IN ('submitted','approved') AND a.kind<>$3
+		ORDER BY peer.id`, sourceID, taskID, kind)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type peerResult struct {
+		TaskID   int64             `json:"task_id"`
+		Version  int               `json:"version"`
+		Group    string            `json:"group"`
+		Kind     string            `json:"kind"`
+		Grades   map[string]string `json:"grades"`
+		Comments map[string]string `json:"dim_comments"`
+		Reasons  []string          `json:"exception_reasons"`
+		Note     string            `json:"exception_note"`
+	}
+	var peers []peerResult
+	for rows.Next() {
+		var peer peerResult
+		if err := rows.Scan(&peer.TaskID, &peer.Version, &peer.Group, &peer.Kind, &peer.Grades, &peer.Comments, &peer.Reasons, &peer.Note); err != nil {
+			return err
+		}
+		peers = append(peers, peer)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(peers) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(peers)
+	if err != nil {
+		return err
+	}
+	// Include the local task and submission kind so acknowledgements are
+	// scoped to this direction of the conflict.
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%s", taskID, kind, data)))
+	token := hex.EncodeToString(sum[:])
+	if accepted == token {
+		return nil
+	}
+	conflict := httpx.New(http.StatusConflict, "GROUP_KIND_MISMATCH", "两组对图片是否有效的判定不同")
+	conflict.Details = map[string]any{"peers": peers, "confirmation": token}
 	return conflict
 }

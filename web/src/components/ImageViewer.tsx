@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Button, Empty, Space, Tooltip } from "antd";
 import { ZoomInOutlined, ZoomOutOutlined, ExpandOutlined, ReloadOutlined, FullscreenOutlined } from "@ant-design/icons";
 
+import { mediaAssetKey, useMediaSource } from "./MediaImage";
+
 interface Props {
   src: string;
   alt?: string;
@@ -9,10 +11,11 @@ interface Props {
 }
 
 export default function ImageViewer(props: Props) {
-  return <ImageCanvas key={`${props.resetKey ?? ""}:${props.src}`} {...props} />;
+  return <ImageCanvas key={`${props.resetKey ?? ""}:${mediaAssetKey(props.src)}`} {...props} />;
 }
 
-function ImageCanvas({ src, alt }: Props) {
+function ImageCanvas({ src: latest, alt }: Props) {
+  const { src, refresh } = useMediaSource(latest);
   const wrapRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [view, setView] = useState({ scale: 1, x: 0, y: 0 });
@@ -75,6 +78,13 @@ function ImageCanvas({ src, alt }: Props) {
     return () => wrap.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
+  useEffect(() => {
+    if (failed && src !== latest) {
+      refresh();
+      setFailed(false);
+    }
+  }, [failed, latest, src, refresh]);
+
   const zoomed = view.scale > fitScale * 1.001;
   const fullscreenAvailable = !!document.fullscreenEnabled && typeof HTMLElement.prototype.requestFullscreen === "function";
   const fullscreenLabel = fullscreenAvailable ? "全屏" : "在新标签页打开原图";
@@ -104,8 +114,8 @@ function ImageCanvas({ src, alt }: Props) {
         <div className="viewer-empty">
           <Empty description={<span style={{ color: "#8b95a8" }}>图片加载失败</span>} image={Empty.PRESENTED_IMAGE_SIMPLE}>
             <Space>
-              <Button icon={<ReloadOutlined />} onClick={() => setFailed(false)}>重新加载</Button>
-              <Button type="primary" href={src} target="_blank">打开原图</Button>
+              <Button icon={<ReloadOutlined />} onClick={() => { refresh(); setFailed(false); }}>重新加载</Button>
+              <Button type="primary" href={latest} target="_blank">打开原图</Button>
             </Space>
           </Empty>
         </div>
@@ -116,7 +126,10 @@ function ImageCanvas({ src, alt }: Props) {
           alt={alt || "作业图片"}
           draggable={false}
           onLoad={() => { setLoaded(true); fit(); }}
-          onError={() => setFailed(true)}
+          onError={() => {
+            if (src !== latest) refresh();
+            else setFailed(true);
+          }}
           style={{
             left: "50%",
             top: "50%",
@@ -134,7 +147,7 @@ function ImageCanvas({ src, alt }: Props) {
             <Button aria-label={fullscreenLabel} size="small" icon={<FullscreenOutlined />}
               onClick={() => wrapRef.current?.requestFullscreen().catch(() => undefined)} />
           ) : (
-            <Button aria-label={fullscreenLabel} size="small" icon={<FullscreenOutlined />} href={src} target="_blank" rel="noopener noreferrer" />
+            <Button aria-label={fullscreenLabel} size="small" icon={<FullscreenOutlined />} href={latest} target="_blank" rel="noopener noreferrer" />
           )}
         </Tooltip>
       </div>

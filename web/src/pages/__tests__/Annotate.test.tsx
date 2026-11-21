@@ -386,3 +386,40 @@ describe("组间校验", () => {
     expect(screen.queryByText(/对方的异常备注/)).not.toBeInTheDocument();
   });
 });
+
+it("显示当前版本修正，最新质检没有备注时隐藏旧审核和仲裁备注", async () => {
+  const current = detail(1);
+  current.image.status = "approved";
+  current.image.grades = { ...current.image.grades, white: "B" };
+  current.grade_changes = { white: { from:"S",to:"B" } };
+  const date = "2026-11-21T09:00:00Z";
+  current.reviews = [
+    { id:-2,source:"quality",action:"approve",comment:"",reason_tags:[],reviewer:"质检员",created_at:date,annotation_version:2 },
+    { id:2,source:"review",action:"approve",comment:"旧审核备注",reason_tags:[],reviewer:"审核员",created_at:date,annotation_version:2 },
+    { id:-1,source:"arbitration",action:"reject",comment:"首版仲裁备注",reason_tags:[],reviewer:"仲裁员",created_at:date,annotation_version:1 },
+  ];
+  mount(true,current);
+  expect(await screen.findByText("审核修正 S → B")).toBeVisible();
+  expect(screen.queryByText("旧审核备注")).not.toBeInTheDocument();
+  expect(screen.queryByText("首版仲裁备注")).not.toBeInTheDocument();
+});
+
+it("异常和对组评级冲突时，显示逐维评语并等待确认后重交", async () => {
+  vi.mocked(api.post).mockRejectedValueOnce(new ApiError(409, "GROUP_KIND_MISMATCH", "两组判定不同", undefined, {
+    confirmation: "current-peer",
+    peers: [{ task_id: 8, group: "对组", kind: "score", grades: { white: "B" }, dim_comments: { white: "对组逐维评语" } }],
+  }));
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "异常输入" }));
+  fireEvent.click(await screen.findByRole("radio", { name: "图片模糊" }));
+  fireEvent.click(screen.getByRole("button", { name: "提交照片不合格" }));
+  const dialog = await screen.findByRole("dialog", { name: "组间有效性判定不同" });
+  expect(within(dialog).getByText("对组逐维评语")).toBeInTheDocument();
+  expect(within(dialog).getByText(/对方标注将作废/)).toBeInTheDocument();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认并提交" }));
+  await screen.findByText("工作台");
+  expect(api.post).toHaveBeenLastCalledWith("/images/1/submit", expect.objectContaining({
+    kind: "exception", exception_reasons: ["blur"], group_confirmation: "current-peer",
+  }));
+});

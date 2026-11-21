@@ -179,7 +179,7 @@ type imageRow struct {
 	AnnotationVersion int
 }
 
-const imageSelect = `
+const imageSelectFields = `
 SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.status,
        COALESCE(i.width,0), COALESCE(i.height,0),
        COALESCE(i.annotator_id,0), COALESCE(u.display_name,''),
@@ -190,7 +190,9 @@ SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.st
        COALESCE(a.comment,''), COALESCE(a.grades::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
        COALESCE(a.exception_reasons,'{}'), COALESCE(a.duration_ms,0),
        COALESCE(i.group_id,0), COALESCE(g.name,''), i.sample_no, i.quality_pending,
-       COALESCE(i.exception_lock_id,0), COALESCE(a.version,0)
+       COALESCE(i.exception_lock_id,0), COALESCE(a.version,0)`
+
+const imageSelectFrom = `
   FROM images i
   JOIN folders f ON f.id = i.folder_id
   LEFT JOIN users u ON u.id = i.annotator_id
@@ -198,16 +200,18 @@ SELECT i.id, i.folder_id, f.name, i.stored_name, i.orig_name, i.seq, i.day, i.st
        AND (i.exception_lock_id IS NOT NULL OR a.version>i.voided_through_version)
   LEFT JOIN annotation_groups g ON g.id=i.group_id`
 
+const imageSelect = imageSelectFields + imageSelectFrom
+
 const imageSelectByID = imageSelect + ` WHERE i.id = $1`
 
-func scanImage(row pgx.Row) (imageRow, error) {
+func scanImage(row pgx.Row, extra ...any) (imageRow, error) {
 	var r imageRow
-	err := row.Scan(&r.ID, &r.FolderID, &r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Day, &r.Status,
+	fields := []any{&r.ID, &r.FolderID, &r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Day, &r.Status,
 		&r.Width, &r.Height, &r.AnnotatorID, &r.Annotator, &r.RejectCount, &r.ReviewCount,
 		&r.ClaimedAt, &r.SubmittedAt, &r.Kind, &r.Comment, &r.Grades,
 		&r.DimComments, &r.Exceptions, &r.DurationMS, &r.GroupID, &r.Group, &r.SampleNo, &r.QualityPending,
-		&r.ExceptionLockID, &r.AnnotationVersion)
-	return r, err
+		&r.ExceptionLockID, &r.AnnotationVersion}
+	return r, row.Scan(append(fields, extra...)...)
 }
 
 func (s *Server) signURL(id int64, variant string) string {

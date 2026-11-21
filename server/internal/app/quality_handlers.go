@@ -128,7 +128,7 @@ func assignUnclaimedSamples(ctx context.Context, tx pgx.Tx) error {
 		FROM (`+activeQualityUsersSQL+`) active
 		WHERE q.inspector_id IS NULL AND q.result IS NULL AND cardinality(ids)>0
 		  AND EXISTS (SELECT 1 FROM reviews r JOIN images i ON i.id=r.image_id
-		              WHERE r.id=q.review_id AND r.annotation_version>i.voided_through_version)`)
+		              WHERE r.id=q.review_id AND r.action='approve' AND r.annotation_version>i.voided_through_version)`)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func assignUnclaimedSamples(ctx context.Context, tx pgx.Tx) error {
 }
 
 const qualityFrom = ` FROM quality_samples q
-	JOIN reviews r ON r.id=q.review_id
+	JOIN reviews r ON r.id=q.review_id AND r.action='approve'
 	JOIN images i ON i.id=q.image_id AND r.annotation_version>i.voided_through_version
 	LEFT JOIN annotation_groups g ON g.id=i.group_id
 	LEFT JOIN users inspector ON inspector.id=q.inspector_id
@@ -264,14 +264,14 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		if err != nil {
 			return err
 		}
-		var review, previous string
-		query := `SELECT q.image_id,q.id,COALESCE(q.inspector_id,0),r.action,COALESCE(q.result,'')` +
+		var previous string
+		query := `SELECT q.image_id,q.id,COALESCE(q.inspector_id,0),COALESCE(q.result,'')` +
 			qualityFrom + ` WHERE q.id=$1 FOR UPDATE OF i`
 		if dispute {
-			query = `SELECT q.image_id,q.id,COALESCE(d.arbiter_id,0),r.action,COALESCE(d.result,'')` +
+			query = `SELECT q.image_id,q.id,COALESCE(d.arbiter_id,0),COALESCE(d.result,'')` +
 				qualityFrom + ` WHERE d.id=$1 AND d.arbiter_id IS DISTINCT FROM q.inspector_id FOR UPDATE OF i`
 		}
-		err = tx.QueryRow(ctx, query, id).Scan(&imageID, &sampleID, &ownerID, &review, &previous)
+		err = tx.QueryRow(ctx, query, id).Scan(&imageID, &sampleID, &ownerID, &previous)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return httpx.NotFound("记录不存在")
 		}
@@ -306,7 +306,7 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		if tag.RowsAffected() == 0 {
 			return httpx.Conflict("该记录已经处理")
 		}
-		if (review == "approve") != (input.Result == "pass") {
+		if input.Result == "fail" {
 			disputeID, arbiterID, err := registerDispute(ctx, tx, sampleID)
 			if err != nil {
 				return err
@@ -317,7 +317,7 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		} else if _, err := tx.Exec(ctx, `UPDATE images SET quality_pending=false WHERE id=$1`, imageID); err != nil {
 			return err
 		}
-		if sourceID != 0 && input.Result == "fail" && review == "approve" {
+		if sourceID != 0 && input.Result == "fail" {
 			if _, err := tx.Exec(ctx, `SELECT sync_group_exception_locks($1)`, []int64{sourceID}); err != nil {
 				return err
 			}

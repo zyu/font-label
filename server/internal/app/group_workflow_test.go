@@ -101,22 +101,30 @@ func TestGroupDispatchAndQualityWorkflow(t *testing.T) {
 	submission := map[string]any{"kind": "exception", "exception_reasons": []string{"blurry"}}
 	request(annotator2, http.MethodPost, secondPath+"/submit", submission, 200)
 	request(reviewer, http.MethodPost, secondPath+"/review", map[string]any{"action": "reject", "comment": "重新判断模糊程度"}, 200)
-	request(annotator2, http.MethodPost, secondPath+"/submit", submission, 409)
+	var pending bool
+	if err := s.pool().QueryRow(ctx, `SELECT quality_pending FROM images WHERE id=$1`, secondID).Scan(&pending); err != nil || pending {
+		t.Fatalf("review rejects must be immediately editable: %v, %v", pending, err)
+	}
+	var samples int
+	if err := s.pool().QueryRow(ctx, `SELECT count(*) FROM quality_samples WHERE image_id=$1`, secondID).Scan(&samples); err != nil || samples != 0 {
+		t.Fatalf("review rejects must not be sampled: %d, %v", samples, err)
+	}
+	request(annotator2, http.MethodPost, secondPath+"/submit", submission, 200)
+	request(reviewer, http.MethodPost, secondPath+"/review", map[string]any{"action": "approve"}, 200)
 	if err := s.pool().QueryRow(ctx, `SELECT id,inspector_id FROM quality_samples WHERE image_id=$1`, secondID).Scan(&sample, &inspector); err != nil || inspector != q2 {
 		t.Fatalf("second inspector: %d, err: %v", inspector, err)
 	}
 	request(otherQuality, http.MethodGet, "/quality/samples", nil, 200)
 	request(otherQuality, http.MethodPost, fmt.Sprintf("/quality/samples/%d", sample), map[string]any{"result": "pass"}, 200)
-	if err := s.pool().QueryRow(ctx, `SELECT id,arbiter_id FROM quality_disputes WHERE sample_id=$1`, sample).Scan(&dispute, &arbiter); err != nil || arbiter != q1 {
-		t.Fatalf("second arbiter: %d, err: %v", arbiter, err)
+	if err := s.pool().QueryRow(ctx, `SELECT count(*) FROM quality_disputes WHERE sample_id=$1`, sample).Scan(&samples); err != nil || samples != 0 {
+		t.Fatalf("passing quality must close without arbitration: %d, %v", samples, err)
 	}
-	request(quality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "approve"}, 200)
-	request(quality, http.MethodPost, fmt.Sprintf("/quality/disputes/%d", dispute), map[string]any{"result": "return"}, 409)
+
 	if err := s.pool().QueryRow(ctx, `SELECT status FROM images WHERE id=$1`, secondID).Scan(&status); err != nil || status != "excluded" {
 		t.Fatalf("approved exception status: %s, err: %v", status, err)
 	}
 	items := regressionRequest(t, router, admin, http.MethodGet, "/audit-logs?action=quality.arbitrate", nil)
-	if items.Code != 200 || strings.Count(items.Body.String(), `"action":"quality.arbitrate"`) != 2 {
+	if items.Code != 200 || strings.Count(items.Body.String(), `"action":"quality.arbitrate"`) != 1 {
 		t.Fatalf("missing arbitration audit trail: %s", items.Body)
 	}
 	request(quality, http.MethodGet, "/audit-logs", nil, 403)

@@ -44,10 +44,10 @@ it("按当前筛选创建 OSS 上传任务并显示完成的对象地址", async
   });
   const post = vi.spyOn(api, "post").mockResolvedValue({ job_id: 33 });
   mount(true);
-  fireEvent.click(screen.getByText("已审核（含打回）", { exact: true }));
+  expect(screen.queryByText("已审核（含打回）", { exact: true })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /上传结果和图片到 OSS/ }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/exports/oss", {
-    filters: { folders: [], annotators: [], status: "reviewed", date_field: "created", from: "", to: "" },
+    filters: { folders: [], annotators: [], status: "approved", date_field: "created", from: "", to: "" },
   }));
   expect(await screen.findByRole("link", { name: "对象地址" })).toHaveAttribute("href", objectURL);
 });

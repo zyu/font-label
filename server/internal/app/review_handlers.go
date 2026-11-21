@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -12,53 +13,132 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/httpx"
 )
 
+const reviewPendingSQL = "(i.status='submitted' AND COALESCE(i.annotator_id,0)<>$1)"
+const latestOwnReviewSQL = `
+	LEFT JOIN LATERAL (
+		SELECT r.id,r.action,r.created_at,
+		       COALESCE(v.payload->>'kind',a.kind,'') AS kind,
+		       COALESCE(NULLIF(v.payload->'grades','null'),a.grades,'{}') || COALESCE(r.grade_patch,'{}') AS grades
+		FROM reviews r
+		LEFT JOIN annotation_versions v ON v.image_id=r.image_id AND v.version=r.annotation_version
+		LEFT JOIN annotations a ON a.id=r.annotation_id AND a.version=r.annotation_version
+		WHERE r.image_id=i.id AND r.reviewer_id=$1 AND r.annotation_version>i.voided_through_version
+		ORDER BY r.created_at DESC,r.id DESC LIMIT 1
+	) last_review ON true`
+
 func (s *Server) handleReviewQueue(c *gin.Context) {
 	me := auth.MustCurrent(c)
 	ctx := c.Request.Context()
-	page, size := httpx.Paging(c)
-
-	clause := "i.status='submitted' AND COALESCE(i.annotator_id,0) <> $1"
+	page, size := listPaging(c)
+	clause := reviewScope("$2", "$1")
 	args := []any{me.ID, me.Role}
-	clause += " AND " + reviewScope("$2", "$1")
-	if fid := httpx.QueryInt64(c, "folder_id"); fid > 0 {
-		args = append(args, fid)
-		clause += " AND i.folder_id=$" + itoa(len(args))
+	status := c.DefaultQuery("status", "pending")
+	switch status {
+	case "pending":
+		clause += " AND " + reviewPendingSQL
+	case "reviewed":
+		clause += " AND last_review.id IS NOT NULL"
+	case "all":
+		clause += " AND (" + reviewPendingSQL + " OR last_review.id IS NOT NULL)"
+	default:
+		httpx.Fail(c, httpx.BadRequest("审核状态不合法"))
+		return
 	}
-	if aid := httpx.QueryInt64(c, "annotator_id"); aid > 0 {
-		args = append(args, aid)
-		clause += " AND i.annotator_id=$" + itoa(len(args))
+	for _, filter := range []struct{ key, column string }{{"folder_id", "i.folder_id"}, {"annotator_id", "i.annotator_id"}} {
+		if id := httpx.QueryInt64(c, filter.key); id > 0 {
+			args = append(args, id)
+			clause += " AND " + filter.column + "=$" + itoa(len(args))
+		}
 	}
 	if kind := c.Query("kind"); kind == "score" || kind == "exception" {
 		args = append(args, kind)
-		clause += " AND a.kind=$" + itoa(len(args))
+		field := "a.kind"
+		if status == "reviewed" {
+			field = "last_review.kind"
+		} else if status == "all" {
+			field = "CASE WHEN " + reviewPendingSQL + " THEN a.kind ELSE last_review.kind END"
+		}
+		clause += " AND " + field + "=$" + itoa(len(args))
 	}
 
 	var total int
-	if err := s.pool().QueryRow(ctx,
-		`SELECT count(*) FROM images i LEFT JOIN annotations a ON a.image_id=i.id WHERE `+clause,
-		args...).Scan(&total); err != nil {
+	if err := s.pool().QueryRow(ctx, `
+		SELECT count(*) FROM images i
+		LEFT JOIN annotations a ON a.image_id=i.id AND a.version>i.voided_through_version`+
+		latestOwnReviewSQL+" WHERE "+clause, args...).Scan(&total); err != nil {
 		httpx.Fail(c, err)
 		return
 	}
 	args = append(args, size, (page-1)*size)
-	rows, err := s.pool().Query(ctx,
-		imageSelect+` WHERE `+clause+` ORDER BY i.submitted_at ASC, i.id ASC LIMIT $`+itoa(len(args)-1)+` OFFSET $`+itoa(len(args)),
-		args...)
+	order := "i.submitted_at ASC,i.id ASC"
+	if status == "reviewed" {
+		order = "last_review.created_at DESC,i.id DESC"
+	} else if status == "all" {
+		order = reviewPendingSQL + " DESC,last_review.created_at DESC NULLS LAST,i.submitted_at,i.id"
+	}
+	selectSQL := imageSelectFields +
+		",last_review.id,last_review.action,last_review.kind,last_review.grades,last_review.created_at," + reviewPendingSQL + " AS can_review" + imageSelectFrom
+	rows, err := s.pool().Query(ctx, selectSQL+latestOwnReviewSQL+" WHERE "+clause+" ORDER BY "+order+
+		" LIMIT $"+itoa(len(args)-1)+" OFFSET $"+itoa(len(args)), args...)
 	if err != nil {
 		httpx.Fail(c, err)
 		return
 	}
 	defer rows.Close()
-	items := []ImageDTO{}
+	type reviewQueueItem struct {
+		ImageDTO
+		ReviewID     *int64     `json:"review_id,omitempty"`
+		ReviewResult string     `json:"review_result,omitempty"`
+		ReviewedAt   *time.Time `json:"reviewed_at,omitempty"`
+		CanReview    bool       `json:"can_review"`
+	}
+	items := []reviewQueueItem{}
 	for rows.Next() {
-		r, err := scanImage(rows)
+		var item reviewQueueItem
+		var action, kind *string
+		var reviewedGrades map[string]string
+		r, err := scanImage(rows, &item.ReviewID, &action, &kind, &reviewedGrades, &item.ReviewedAt, &item.CanReview)
 		if err != nil {
 			httpx.Fail(c, err)
 			return
 		}
-		items = append(items, s.toDTO(r))
+		item.ImageDTO = s.toDTO(r)
+		if status == "reviewed" || !item.CanReview {
+			item.CanReview = false
+			if action != nil && kind != nil {
+				item.Kind, item.Grades = *kind, reviewedGrades
+				item.ReviewResult = "approved"
+				if *action == "reject" {
+					item.ReviewResult = "rejected"
+				} else if *kind == "exception" {
+					item.ReviewResult = "excluded"
+				}
+			}
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		httpx.Fail(c, err)
+		return
 	}
 	httpx.OK(c, gin.H{"items": items, "total": total, "page": page, "page_size": size})
+}
+
+func (s *Server) handleReviewStats(c *gin.Context) {
+	me := auth.MustCurrent(c)
+	var pending, approved, rejected, excluded int
+	err := s.pool().QueryRow(c.Request.Context(), `
+		SELECT count(*) FILTER (WHERE `+reviewPendingSQL+`),
+		       count(*) FILTER (WHERE last_review.action='approve' AND last_review.kind='score'),
+		       count(*) FILTER (WHERE last_review.action='reject'),
+		       count(*) FILTER (WHERE last_review.action='approve' AND last_review.kind='exception')
+		FROM images i`+latestOwnReviewSQL+" WHERE "+reviewScope("$2", "$1"), me.ID, me.Role).
+		Scan(&pending, &approved, &rejected, &excluded)
+	if err != nil {
+		httpx.Fail(c, err)
+		return
+	}
+	httpx.OK(c, gin.H{"pending": pending, "approved": approved, "rejected": rejected, "excluded": excluded})
 }
 
 func (s *Server) handleMyReviews(c *gin.Context) {
@@ -264,7 +344,7 @@ func (s *Server) handleReview(c *gin.Context) {
 				return err
 			}
 		}
-		if groupID != 0 {
+		if groupID != 0 && in.Action == "approve" {
 			if err := s.enqueueQualitySample(c, tx, id, reviewID, in.Action); err != nil {
 				return err
 			}

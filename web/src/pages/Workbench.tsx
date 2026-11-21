@@ -1,3 +1,4 @@
+import MediaImage from "../components/MediaImage";
 import RatingSummary from "../components/RatingSummary";
 import ListTable from "../components/ListTable";
 import { useState } from "react";
@@ -122,7 +123,7 @@ export default function WorkbenchPage() {
       dataIndex: "thumb_url",
       width: 80,
       render: (_: string, row: ImageDTO) => (
-        <img className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => openTask(row)} />
+        <MediaImage className="thumb" src={row.thumb_url} alt={row.stored_name} onClick={() => openTask(row)} />
       ),
     },
     { title: "文件名", dataIndex: "stored_name", render: (v: string, row: ImageDTO) => <a onClick={() => openTask(row)}>{v}</a> },

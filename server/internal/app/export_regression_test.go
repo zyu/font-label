@@ -14,6 +14,10 @@ import (
 	"github.com/shangyue/font-label/server/internal/platform/storage"
 )
 
+func ratingTestComments() map[string]string {
+	return map[string]string{"white": "间距均匀", "black": "重心稳定", "variation": "主笔舒展", "structure": "比例协调", "control": "收笔略欠顿"}
+}
+
 func TestTrainingZIP(t *testing.T) {
 	for _, n := range []int{1, 10000} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
@@ -26,7 +30,7 @@ func TestTrainingZIP(t *testing.T) {
 			}
 			rows := make([]exportRow, n)
 			for i := range rows {
-				rows[i] = exportRow{ID: int64(i + 1), FolderID: 1, StoredName: "same.png", RelPath: "source.png", Status: "approved", Grades: ratingTestGrades()}
+				rows[i] = exportRow{ID: int64(i + 1), FolderID: 1, StoredName: "same.png", RelPath: "source.png", Status: "approved", Grades: ratingTestGrades(), DimComments: ratingTestComments()}
 			}
 			rows = append(rows, exportRow{ID: int64(n + 1), Status: "submitted"})
 			var buf bytes.Buffer
@@ -100,7 +104,7 @@ func TestTrainingZIPMissingImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	_, err = renderTrainingZIP(&buf, []exportRow{{ID: 1, StoredName: "missing.png", RelPath: "missing.png", Status: "approved", Grades: ratingTestGrades()}}, ratingTestDims(), store)
+	_, err = renderTrainingZIP(&buf, []exportRow{{ID: 1, StoredName: "missing.png", RelPath: "missing.png", Status: "approved", Grades: ratingTestGrades(), DimComments: ratingTestComments()}}, ratingTestDims(), store)
 	if err == nil {
 		t.Fatal("must fail instead of exporting dangling image references")
 	}
@@ -115,7 +119,7 @@ func TestTrainingZIPScoredSamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	dims := ratingTestDims()
-	row := exportRow{ID: 1, StoredName: "字.png", RelPath: "source.png", Status: "approved", Grades: ratingTestGrades(), DimComments: map[string]string{"white": "间距均匀", "black": "重心稳定"}}
+	row := exportRow{ID: 1, StoredName: "字.png", RelPath: "source.png", Status: "approved", Grades: ratingTestGrades(), DimComments: ratingTestComments()}
 	incomplete := row
 	incomplete.ID = 2
 	incomplete.Grades = map[string]string{"white": "S"}
@@ -143,7 +147,7 @@ func TestTrainingZIPScoredSamples(t *testing.T) {
 	if rec.Messages[0].Content != trainUserPrompt || rec.Images[0] != "images/1_字.png" {
 		t.Fatalf("bad sample: %+v", rec)
 	}
-	for _, text := range []string{"白平衡（匀）：S；点评：间距均匀", "黑平衡（稳）：A；点评：重心稳定", "控笔：D"} {
+	for _, text := range []string{"白平衡（匀）：S，间距均匀", "黑平衡（稳）：A，重心稳定", "控笔：D"} {
 		if !strings.Contains(rec.Messages[1].Content, text) {
 			t.Fatalf("missing %s: %+v", text, rec)
 		}

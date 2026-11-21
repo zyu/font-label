@@ -4,7 +4,7 @@ import { CheckOutlined, CloseOutlined, ArrowLeftOutlined, ArrowRightOutlined } f
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../api/client";
-import type { ImageDTO, ImageDetail, Page } from "../api/types";
+import type { ReviewQueueItem, ImageDetail, Page } from "../api/types";
 import { exceptionReasonLabel, stringSetting } from "../lib/settings";
 import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
@@ -16,7 +16,14 @@ export default function ReviewPage() {
   const nav = useNavigate();
   const location = useLocation();
   const returnTo = location.state?.returnTo?.startsWith("/review?") ? location.state.returnTo : "/review";
-  const navigateToImage = (imageId: number) => nav(`/review/${imageId}`, { state: location.state });
+  const reviewId = new URLSearchParams(location.search).get("review_id");
+  const listParams = new URLSearchParams(returnTo.split("?")[1]);
+  listParams.set("page_size", "20");
+  const listURL = `/reviews/queue?${listParams}`;
+  const navigateToImage = (item: ReviewQueueItem) => {
+    const snapshot = item.can_review === false && item.review_id ? `?review_id=${item.review_id}` : "";
+    nav(`/review/${item.id}${snapshot}`, { state: location.state });
+  };
   const qc = useQueryClient();
   const { me } = useAuth();
   const rubric = me!.rubric;
@@ -27,14 +34,14 @@ export default function ReviewPage() {
   const [patched, setPatched] = useState<Record<string, Level>>({});
 
   const detail = useQuery({
-    queryKey: ["image", id],
-    queryFn: () => api.get<ImageDetail>(`/images/${id}`),
+    queryKey: reviewId ? ["image", id, "review", reviewId] : ["image", id],
+    queryFn: () => api.get<ImageDetail>(`/images/${id}${reviewId ? `?review_id=${encodeURIComponent(reviewId)}` : ""}`),
     enabled: id > 0,
   });
 
   const queue = useQuery({
-    queryKey: ["review-queue-nav"],
-    queryFn: () => api.get<Page<ImageDTO>>("/reviews/queue?page_size=200"),
+    queryKey: ["review-queue-nav", listURL],
+    queryFn: () => api.get<Page<ReviewQueueItem>>(listURL),
   });
 
   const image = detail.data?.image;
@@ -51,8 +58,9 @@ export default function ReviewPage() {
       qc.invalidateQueries({ queryKey: ["review-queue-nav"] });
       const list = queue.data?.items ?? [];
       const idx = list.findIndex((x) => x.id === id);
-      const next = idx >= 0 ? list[idx + 1] : undefined;
-      if (next) navigateToImage(next.id); else nav(returnTo);
+      void qc.invalidateQueries({ queryKey: ["review-stats"] });
+      const next = idx >= 0 ? list.slice(idx + 1).find((item) => item.can_review ?? item.status === "submitted") : undefined;
+      if (next) navigateToImage(next); else nav(returnTo);
     },
     onError: (e) => message.error(e instanceof ApiError ? e.message : "操作失败"),
   });
@@ -62,14 +70,14 @@ export default function ReviewPage() {
     setRejectOpen(false);
     setComment("");
     setTags([]);
-  }, [id]);
+  }, [id, reviewId]);
 
   // 切图时恢复该图的原始等级。
   useEffect(() => {
     if (!image) return;
     setPatched({ ...(image.grades ?? {}) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [image?.id]);
+  }, [image?.id, reviewId]);
 
   const mergedGrades = useMemo(
     () => ({ ...(image?.grades ?? {}), ...patched }),
@@ -104,6 +112,7 @@ export default function ReviewPage() {
 
   const latest = detail.data?.reviews?.[0];
   const isException = image.kind === "exception";
+  const canReview = !reviewId && image.status === "submitted";
 
   return (
     <div className="annotate-shell">
@@ -119,8 +128,8 @@ export default function ReviewPage() {
           {image.reject_count > 0 && <Tag color="volcano">历史驳回 {image.reject_count} 次</Tag>}
         </Space>
         <Space>
-          <Button aria-label="上一张" icon={<ArrowLeftOutlined />} disabled={!prev || review.isPending} onClick={() => navigateToImage(prev!.id)} />
-          <Button aria-label="下一张" icon={<ArrowRightOutlined />} disabled={!next || review.isPending} onClick={() => navigateToImage(next!.id)} />
+          <Button aria-label="上一张" icon={<ArrowLeftOutlined />} disabled={!prev || review.isPending} onClick={() => navigateToImage(prev!)} />
+          <Button aria-label="下一张" icon={<ArrowRightOutlined />} disabled={!next || review.isPending} onClick={() => navigateToImage(next!)} />
         </Space>
       </div>
 
@@ -130,6 +139,7 @@ export default function ReviewPage() {
         </Card>
 
         <div className="panel-card">
+          <div className="panel-scroll">
           {!isException && <Descriptions
             size="small"
             column={2}
@@ -150,7 +160,7 @@ export default function ReviewPage() {
             ]}
           />}
 
-          {image.kind === "score" && (
+          {image.kind === "score" && canReview && (
             <Card
               size="small"
               title="等级修正（可选）"
@@ -173,7 +183,7 @@ export default function ReviewPage() {
                         size="small"
                         value={cur}
                         options={LEVELS.map((value) => ({ label: value, value }))}
-                        disabled={image.status !== "submitted"}
+                        disabled={!canReview}
                         onChange={(v) =>
                           setPatched((p) => ({ ...p, [d.key]: v }))
                         }
@@ -224,14 +234,15 @@ export default function ReviewPage() {
             </Card>
           )}
 
-          <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          {!canReview && <Typography.Text type="secondary">{reviewId ? "已审核记录" : "该图片当前为只读"}</Typography.Text>}
+          </div>
+          {canReview && <div className="panel-footer review-footer">
             <Button
               type="primary"
               size="large"
-              block
               icon={<CheckOutlined aria-hidden="true" />}
               loading={review.isPending}
-              disabled={image.status !== "submitted"}
+              disabled={!canReview}
               onClick={() =>
                 review.mutate({
                   action: "approve",
@@ -246,9 +257,8 @@ export default function ReviewPage() {
             <Button
               danger
               size="large"
-              block
               icon={<CloseOutlined />}
-              disabled={image.status !== "submitted"}
+              disabled={!canReview}
               onClick={() => {
                 setComment("");
                 setTags([]);
@@ -258,10 +268,7 @@ export default function ReviewPage() {
             >
               批注打回
             </Button>
-            {image.status !== "submitted" && (
-              <Typography.Text type="secondary">该图片当前状态为「{image.status}」，不能再次审核。</Typography.Text>
-            )}
-          </Space>
+          </div>}
         </div>
       </div>
 

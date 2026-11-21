@@ -37,6 +37,7 @@ type exportRow struct {
 	SampleNo       int64
 	QualityPending bool
 	ID             int64
+	SourceID       int64
 	FolderID       int64
 	Folder         string
 	StoredName     string
@@ -61,7 +62,7 @@ SELECT f.name, i.stored_name, i.orig_name, i.seq, COALESCE(u.display_name,''),
        i.submitted_at, COALESCE(a.grades::text,'{}'), COALESCE(a.dim_comments::text,'{}'),
        COALESCE(a.comment,''), i.status, COALESCE(rv.display_name,''), i.reviewed_at,
        i.reject_count, COALESCE(array_to_string(a.exception_reasons, '、'),''), i.rel_path,
-       i.folder_id, i.id, COALESCE(g.name,''), i.sample_no, i.quality_pending
+       i.folder_id, i.id, COALESCE(g.name,''), i.sample_no, i.quality_pending, COALESCE(i.source_image_id,i.id)
   FROM images i
   JOIN folders f ON f.id = i.folder_id
   LEFT JOIN annotation_groups g ON g.id=i.group_id
@@ -78,7 +79,7 @@ func scanExportRow(rows pgx.Rows) (exportRow, error) {
 	var submitted, reviewed *time.Time
 	if err := rows.Scan(&r.Folder, &r.StoredName, &r.OrigName, &r.Seq, &r.Annotator,
 		&submitted, &grades, &dimComments, &r.Comment, &r.Status, &r.Reviewer,
-		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID, &r.ID, &r.Group, &r.SampleNo, &r.QualityPending); err != nil {
+		&reviewed, &r.RejectNum, &r.Exceptions, &r.RelPath, &r.FolderID, &r.ID, &r.Group, &r.SampleNo, &r.QualityPending, &r.SourceID); err != nil {
 		return r, err
 	}
 	r.Submitted, r.ReviewedAt = submitted, reviewed
@@ -144,7 +145,12 @@ func eligibleExportRows(format string, rows []exportRow, dims []score.Dim) []exp
 	return out
 }
 
-const trainUserPrompt = "<image>请评价这位学员的硬笔楷书单字，并给出五维 S/A/B/C/D 等级和各维评语。"
+const trainUserPrompt = "<image>请评价这位学员的硬笔楷书单字，对照范字，按匀、稳、参差、结构、控笔五个维度各评一个等级（S/A/B/C/D）和具体评语。"
+
+var trainingDimensions = []score.Dim{
+	{Key: "white", Label: "匀（白平衡）"}, {Key: "black", Label: "稳（黑平衡）"},
+	{Key: "variation", Label: "参差"}, {Key: "structure", Label: "结构"}, {Key: "control", Label: "控笔"},
+}
 
 func assistantContent(r exportRow, dims []score.Dim) (string, bool) {
 	if r.Status != "approved" || r.QualityPending || len(dims) != 5 {
@@ -156,11 +162,11 @@ func assistantContent(r exportRow, dims []score.Dim) (string, bool) {
 		if score.GradeRank(level) == 0 {
 			return "", false
 		}
-		line := dim.Label + "：" + level
-		if comment := strings.TrimSpace(r.DimComments[dim.Key]); comment != "" {
-			line += "；点评：" + comment
+		comment := strings.TrimSpace(r.DimComments[dim.Key])
+		if comment == "" {
+			return "", false
 		}
-		lines = append(lines, line)
+		lines = append(lines, dim.Label+"："+level+"，"+comment)
 	}
 	return strings.Join(lines, "\n"), true
 }
@@ -395,7 +401,8 @@ func (s *Server) handleListExports(c *gin.Context) {
 	me := auth.MustCurrent(c)
 	page, size := listPaging(c)
 	ctx := c.Request.Context()
-	clause := "destination='oss' AND ($1 OR user_id=$2)"
+	// Previously uploaded packages used a different contract and are retained in audit history.
+	clause := "destination='oss' AND format='jsonl' AND ($1 OR user_id=$2)"
 	args := []any{me.Role == "admin", me.ID}
 	var total int
 	if err := s.pool().QueryRow(ctx, "SELECT count(*) FROM export_jobs WHERE "+clause, args...).Scan(&total); err != nil {

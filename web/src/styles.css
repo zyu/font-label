@@ -283,3 +283,7 @@ body {
 .quality-image-frame { height: min(360px, 52dvh); min-height: 220px; display: flex; flex-direction: column; }
 .rating-comments { max-width: min(260px, 65vw); }
 .rating-comments > .ant-space-item { min-width: 0; }
+
+.panel-footer { flex-shrink: 0; }
+.review-footer > .ant-btn { flex: 1; min-width: 0; }
+.dimension-review-change { color: #1555a5; font-size: 13px; font-weight: 600; }
