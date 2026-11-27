@@ -8,6 +8,18 @@ import { useAuth } from "../auth";
 import ImageViewer from "../components/ImageViewer";
 import { exceptionReasonLabel } from "../lib/settings";
 
+interface GradeDifference {
+  dimension: string;
+  label: string;
+  own_grade: string;
+  peer_grade: string;
+  gap: number;
+  own_comment: string;
+  peer_comment: string;
+  peer_group: string;
+  peer_annotator: string;
+}
+
 interface QualityRecord {
   id: number;
   sample_id: string;
@@ -29,6 +41,7 @@ interface QualityRecord {
     exception_note?: string;
   };
   grade_patch: Record<string, string> | null;
+  grade_differences?: GradeDifference[];
   quality_result: "" | "pass" | "fail";
   quality_note: string;
   inspector: string;
@@ -128,8 +141,12 @@ export default function Quality() {
             { title: "组别", dataIndex: "group" },
             { title: "标注版本", dataIndex: "version" },
             { title: "审核结果", render: (_, row) => row.review === "approve" ? "通过" : "退回" },
-            { title: "质检员", dataIndex: "inspector", render: (value: string) => value || "待分配" },
-            { title: "质检结论", render: (_, row) => row.quality_result ? qualityLabels[row.quality_result] : "待质检" },
+            { title: "质检员", dataIndex: "inspector", render: (value: string, row) => row.grade_differences?.length ? "—" : value || "待分配" },
+            { title: disputes ? "争议原因" : "质检结论", render: (_, row) => {
+              if (row.grade_differences?.length) return "组间等级差异";
+              if (disputes && row.quality_result === "fail") return "质检不合格";
+              return row.quality_result ? qualityLabels[row.quality_result] : "待质检";
+            } },
             ...(disputes ? [
               { title: "仲裁员", dataIndex: "arbiter", render: (value: string, row: QualityRecord) => <Space>{value || "待分配"}{row.self_arbitrated && <Tag color="red">同人质检与仲裁</Tag>}</Space> },
               { title: "仲裁状态", render: (_: unknown, row: QualityRecord) => <Tag color={row.ruling ? "green" : "orange"}>{row.ruling ? `已仲裁 · ${rulingLabels[row.ruling]}` : row.awaiting_arbiter ? "待分配独立仲裁员" : "待仲裁"}</Tag> },
@@ -168,6 +185,23 @@ export default function Quality() {
             {!!selected.dispute_id && <Descriptions.Item label="争议登记">#{selected.dispute_id} · {timeLabel(selected.registered_at)}</Descriptions.Item>}
             {selected.ruling && <Descriptions.Item label="仲裁">{selected.arbiter} · {rulingLabels[selected.ruling]} · {timeLabel(selected.resolved_at)} {selected.ruling_note}</Descriptions.Item>}
           </Descriptions>
+          {!!selected.grade_differences?.length && (
+            <ListTable<GradeDifference>
+              rowKey={(row) => `${row.peer_group}:${row.dimension}`}
+              size="small"
+              pagination={false}
+              dataSource={selected.grade_differences}
+              columns={[
+                { title: "维度", dataIndex: "label" },
+                { title: "本组原始标注", render: (_, row) => <><Tag>{row.own_grade}</Tag>{row.own_comment}</> },
+                { title: "对组原始标注", render: (_, row) => (<>
+                  <div>{row.peer_group} · {row.peer_annotator}</div>
+                  <Tag>{row.peer_grade}</Tag>{row.peer_comment}
+                </>) },
+                { title: "档差", render: (_, row) => `相差 ${row.gap} 档` },
+              ]}
+            />
+          )}
           {selected.awaiting_arbiter && <Alert type="warning" title="暂无独立仲裁员，已挂起待分配" />}
           {selected.self_arbitrated && <Alert type="warning" title="历史记录由同一人质检和仲裁" />}
           {canDecide && <Input.TextArea aria-label="处理备注" placeholder="处理备注" value={note}

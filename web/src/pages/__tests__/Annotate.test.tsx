@@ -347,27 +347,22 @@ describe("新版定级与历史数据", () => {
 });
 
 describe("组间校验", () => {
-  it("并排显示相差两档的等级和评语，关闭弹窗后可以修改并重交", async () => {
-    vi.mocked(api.post).mockRejectedValueOnce(new ApiError(409, "GRADE_MISMATCH", "组间等级差异", undefined, {
-      differences: [{
-        dimension: "white", label: "白平衡（匀）", own_grade: "S", peer_grade: "B", gap: 2,
-        own_comment: "我的白平衡评语", peer_comment: "对方的白平衡评语",
-      }],
-    }));
+  it("相差两档时提交原等级并显示先提交者的名字", async () => {
+    vi.mocked(api.post).mockResolvedValueOnce({ peer_annotators: ["王老师"] });
     mount();
     fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
-    const dialog = await screen.findByRole("dialog", { name: "组间等级差异" });
-    for (const content of ["白平衡（匀）", "相差 2 档", "我的白平衡评语", "对方的白平衡评语"]) {
-      await waitFor(() => expect(within(dialog).getByText(content)).toBeVisible());
-    }
-    fireEvent.click(within(dialog).getByRole("button", { name: "返回修改" }));
-    const white = screen.getByRole("radiogroup", { name: /white/ });
-    fireEvent.click(within(white).getByRole("radio", { name: /^A/ }));
-    fireEvent.click(screen.getByRole("button", { name: /提交并下一张/ }));
     await screen.findByText("工作台");
-    expect(api.post).toHaveBeenLastCalledWith("/images/1/submit", expect.objectContaining({
-      grades: expect.objectContaining({ white: "A" }),
-    }));
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(api.post).toHaveBeenCalledWith("/images/1/submit", expect.objectContaining({ grades }));
+    expect(message.success).toHaveBeenCalledWith(expect.stringContaining("先提交的标注员：王老师"), 6);
+  });
+
+  it("重新打开已提交的标注时仍能看到先提交者", () => {
+    const saved = detail(1);
+    saved.image.status = "submitted";
+    saved.peer_annotators = ["王老师"];
+    mount(true, saved);
+    expect(screen.getByText("先提交的标注员：王老师")).toBeVisible();
   });
 
   it("锁定时只展示对组异常和审核结果，恢复后显示编辑器", async () => {

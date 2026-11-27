@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -33,37 +34,39 @@ func exceptionLockedError() *httpx.APIError {
 }
 
 type gradeDifference struct {
-	Dimension   string `json:"dimension"`
-	Label       string `json:"label"`
-	OwnGrade    string `json:"own_grade"`
-	PeerGrade   string `json:"peer_grade"`
-	Gap         int    `json:"gap"`
-	OwnComment  string `json:"own_comment"`
-	PeerComment string `json:"peer_comment"`
-	PeerGroup   string `json:"peer_group"`
+	Dimension     string `json:"dimension"`
+	Label         string `json:"label"`
+	OwnGrade      string `json:"own_grade"`
+	PeerGrade     string `json:"peer_grade"`
+	Gap           int    `json:"gap"`
+	OwnComment    string `json:"own_comment"`
+	PeerComment   string `json:"peer_comment"`
+	PeerGroup     string `json:"peer_group"`
+	PeerAnnotator string `json:"peer_annotator"`
 }
 
-func checkGroupGrades(ctx context.Context, tx pgx.Tx, sourceID, taskID int64, rubric score.Rubric, grades map[string]string, comments map[string]string) error {
+func groupGradeDifferences(ctx context.Context, tx pgx.Tx, sourceID, taskID int64, rubric score.Rubric, grades map[string]string, comments map[string]string) ([]gradeDifference, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT g.name, COALESCE(v.payload->'grades',a.grades), COALESCE(v.payload->'dim_comments',a.dim_comments)
+		SELECT g.name, u.display_name, COALESCE(v.payload->'grades',a.grades), COALESCE(v.payload->'dim_comments',a.dim_comments)
 		FROM images peer
 		JOIN annotation_groups g ON g.id=peer.group_id
 		JOIN annotations a ON a.image_id=peer.id AND a.version>peer.voided_through_version
+		JOIN users u ON u.id=a.annotator_id
 		LEFT JOIN annotation_versions v ON v.image_id=peer.id AND v.version=a.version
 		WHERE peer.source_image_id=$1 AND peer.id<>$2
 		  AND peer.status IN ('submitted','approved') AND a.kind='score'
 		ORDER BY a.submitted_at, peer.id`, sourceID, taskID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
 	var differences []gradeDifference
 	for rows.Next() {
-		var group string
+		var group, annotator string
 		var peerGrades, peerComments map[string]string
-		if err := rows.Scan(&group, &peerGrades, &peerComments); err != nil {
-			return err
+		if err := rows.Scan(&group, &annotator, &peerGrades, &peerComments); err != nil {
+			return nil, err
 		}
 		for _, dim := range rubric.Dims {
 			ownGrade, peerGrade := grades[dim.Key], peerGrades[dim.Key]
@@ -78,18 +81,24 @@ func checkGroupGrades(ctx context.Context, tx pgx.Tx, sourceID, taskID int64, ru
 			differences = append(differences, gradeDifference{
 				Dimension: dim.Key, Label: dim.Label, OwnGrade: ownGrade, PeerGrade: peerGrade,
 				Gap: gap, OwnComment: comments[dim.Key], PeerComment: peerComments[dim.Key], PeerGroup: group,
+				PeerAnnotator: annotator,
 			})
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
+	return differences, rows.Err()
+}
+
+func withPeerAnnotators(response map[string]any, differences []gradeDifference) map[string]any {
+	var names []string
+	for _, difference := range differences {
+		if !slices.Contains(names, difference.PeerAnnotator) {
+			names = append(names, difference.PeerAnnotator)
+		}
 	}
-	if len(differences) == 0 {
-		return nil
+	if len(names) > 0 {
+		response["peer_annotators"] = names
 	}
-	conflict := httpx.New(http.StatusConflict, "GRADE_MISMATCH", "组间等级差异")
-	conflict.Details = map[string]any{"differences": differences}
-	return conflict
+	return response
 }
 
 // checkGroupKinds requires explicit acceptance of the exact peer submissions

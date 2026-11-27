@@ -141,13 +141,17 @@ func (s *Server) handleSubmit(c *gin.Context) {
 	}
 
 	// idempotency: same client_submit_id returns the previous result
+	var differences []gradeDifference
 	if in.ClientSubmitID != "" {
 		var imgID int64
 		var ver int
 		var ownerID int64
 		err := s.pool().QueryRow(ctx,
-			`SELECT a.image_id, a.version, a.annotator_id FROM annotations a JOIN images i ON i.id=a.image_id WHERE a.client_submit_id=$1 AND a.version>i.voided_through_version`,
-			in.ClientSubmitID).Scan(&imgID, &ver, &ownerID)
+			`SELECT a.image_id, a.version, a.annotator_id, v.payload->'grade_differences'
+			 FROM annotations a JOIN images i ON i.id=a.image_id
+			 LEFT JOIN annotation_versions v ON v.image_id=a.image_id AND v.version=a.version
+			 WHERE a.client_submit_id=$1 AND a.version>i.voided_through_version`,
+			in.ClientSubmitID).Scan(&imgID, &ver, &ownerID, &differences)
 		if err == nil {
 			if ownerID != me.ID {
 				httpx.Fail(c, httpx.Forbidden("这不是你的任务"))
@@ -157,7 +161,7 @@ func (s *Server) handleSubmit(c *gin.Context) {
 				httpx.Fail(c, httpx.Conflict("提交标识已被其他任务使用"))
 				return
 			}
-			httpx.OK(c, gin.H{"duplicate": true, "version": ver})
+			httpx.OK(c, withPeerAnnotators(gin.H{"duplicate": true, "version": ver}, differences))
 			return
 		}
 	}
@@ -258,13 +262,18 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		}
 		// A concurrent retry may have committed while this request waited for the lock.
 		if in.ClientSubmitID != "" {
-			var previousImageID int64
+			var previousImageID, ownerID int64
 			var voided bool
 			err := tx.QueryRow(ctx, `
-				SELECT a.image_id,a.version,a.version<=i.voided_through_version
-				FROM annotations a JOIN images i ON i.id=a.image_id WHERE a.client_submit_id=$1`,
-				in.ClientSubmitID).Scan(&previousImageID, &newVersion, &voided)
+				SELECT a.image_id,a.version,a.annotator_id,a.version<=i.voided_through_version,v.payload->'grade_differences'
+				FROM annotations a JOIN images i ON i.id=a.image_id
+				LEFT JOIN annotation_versions v ON v.image_id=a.image_id AND v.version=a.version
+				WHERE a.client_submit_id=$1`,
+				in.ClientSubmitID).Scan(&previousImageID, &newVersion, &ownerID, &voided, &differences)
 			if err == nil {
+				if ownerID != me.ID {
+					return httpx.Forbidden("这不是你的任务")
+				}
 				if previousImageID != id {
 					return httpx.Conflict("提交标识已被其他任务使用")
 				}
@@ -290,7 +299,8 @@ func (s *Server) handleSubmit(c *gin.Context) {
 			}
 		}
 		if sourceID != 0 && kind == "score" {
-			if err := checkGroupGrades(ctx, tx, sourceID, id, rubric, in.Grades, dimComments); err != nil {
+			differences, err = groupGradeDifferences(ctx, tx, sourceID, id, rubric, in.Grades, dimComments)
+			if err != nil {
 				return err
 			}
 		}
@@ -316,10 +326,14 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		if err != nil {
 			return err
 		}
-		payload, _ := json.Marshal(gin.H{
+		versionPayload := gin.H{
 			"kind": kind, "grades": in.Grades, "dim_comments": dimComments,
 			"exception_reasons": reasons, "exception_note": comment,
-		})
+		}
+		if len(differences) > 0 {
+			versionPayload["grade_differences"] = differences
+		}
+		payload, _ := json.Marshal(versionPayload)
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO annotation_versions (image_id, version, annotator_id, payload, submitted_at)
 			 VALUES ($1,$2,$3,$4::jsonb,now()) ON CONFLICT (image_id, version) DO NOTHING`,
@@ -345,13 +359,13 @@ func (s *Server) handleSubmit(c *gin.Context) {
 		return
 	}
 	if duplicate {
-		httpx.OK(c, gin.H{"duplicate": true, "version": newVersion})
+		httpx.OK(c, withPeerAnnotators(gin.H{"duplicate": true, "version": newVersion}, differences))
 		return
 	}
-	httpx.OK(c, gin.H{
+	httpx.OK(c, withPeerAnnotators(gin.H{
 		"version": newVersion, "kind": kind,
 		"status": "submitted", "comment_required": rubric.DimCommentMin,
-	})
+	}, differences))
 }
 
 func (s *Server) validExceptionReasons(ctx context.Context, reasons []string) bool {

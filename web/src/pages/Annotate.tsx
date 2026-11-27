@@ -7,7 +7,6 @@ import {
   Modal,
   Space,
   Spin,
-  Table,
   Tag,
   Tooltip,
   Typography,
@@ -35,17 +34,6 @@ import { LEVELS, type Level } from "../lib/annotationLevels";
 import { exceptionReasonLabel, exceptionReasons } from "../lib/settings";
 import { createSubmitId } from "../lib/submitId";
 import { STATUS_LABEL } from "../api/types";
-
-interface GradeDifference {
-  dimension: string;
-  label: string;
-  own_grade: Level;
-  peer_grade: Level;
-  gap: number;
-  own_comment: string;
-  peer_comment: string;
-  peer_group: string;
-}
 
 interface GroupKindConflict {
   confirmation: string;
@@ -94,7 +82,6 @@ function AnnotationEditor({ id }: { id: number }) {
   const [invalidDim, setInvalidDim] = useState<string>();
   const cardList = useRef<HTMLDivElement>(null);
   const [excOpen, setExcOpen] = useState(false);
-  const [differences, setDifferences] = useState<GradeDifference[]>([]);
   const [kindConflict, setKindConflict] = useState<{ details: GroupKindConflict; payload: Record<string, unknown> }>();
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleOpen, setExampleOpen] = useState(false);
@@ -148,7 +135,6 @@ function AnnotationEditor({ id }: { id: number }) {
     setGrades(savedGrades);
     setDimComments(draft?.dim_comments ?? image.dim_comments ?? {});
     setDirty(false);
-    setDifferences([]);
     setKindConflict(undefined);
     if (!canEdit) setExcOpen(false);
     setInitialized(`${image.id}:${image.status}`);
@@ -210,11 +196,15 @@ function AnnotationEditor({ id }: { id: number }) {
     mutationFn: async (payload: Record<string, unknown>) => {
       clearTimeout(draftTimer.current);
       await draftSaves.current.catch(() => undefined);
-      return api.post(`/images/${id}/submit`, { ...payload, client_submit_id: createSubmitId() });
+      return api.post<{ peer_annotators?: string[] }>(`/images/${id}/submit`, { ...payload, client_submit_id: createSubmitId() });
     },
     onMutate: () => ({ queue: queue.data ?? [] }),
-    onSuccess: async (_data, _payload, context) => {
-      message.success("已提交，等待审核");
+    onSuccess: async (result, _payload, context) => {
+      if (result?.peer_annotators?.length) {
+        message.success(`已提交，审核通过后进入仲裁。先提交的标注员：${result.peer_annotators.join("、")}`, 6);
+      } else {
+        message.success("已提交，等待审核");
+      }
       qc.invalidateQueries({ queryKey: ["image", id] });
       qc.invalidateQueries({ queryKey: ["my-counts"] });
       qc.invalidateQueries({ queryKey: ["my-tasks"] });
@@ -256,13 +246,6 @@ function AnnotationEditor({ id }: { id: number }) {
           return;
         }
       }
-      if (e instanceof ApiError && e.code === "GRADE_MISMATCH") {
-        const details = e.details as { differences?: GradeDifference[] } | undefined;
-        if (details?.differences?.length) {
-          setDifferences(details.differences);
-          return;
-        }
-      }
       if (e instanceof ApiError && e.code === "EXCEPTION_LOCKED") {
         void qc.invalidateQueries({ queryKey: ["image", id] });
         void qc.invalidateQueries({ queryKey: ["my-tasks"] });
@@ -280,7 +263,7 @@ function AnnotationEditor({ id }: { id: number }) {
   }
 
   function doSubmit() {
-    if (!canEdit || excOpen || (differences.length > 0 || kindConflict) || submitting.current) return;
+    if (!canEdit || excOpen || kindConflict || submitting.current) return;
     if (firstInvalid) {
       const key = firstInvalid.key;
       const commentEnabled = grades[key] !== undefined;
@@ -336,7 +319,7 @@ function AnnotationEditor({ id }: { id: number }) {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen || differences.length > 0 || kindConflict) return;
+      if (e.defaultPrevented || e.isComposing || excOpen || helpOpen || exampleOpen || kindConflict) return;
       const el = e.target as HTMLElement;
       const typing = ["INPUT", "TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -427,6 +410,9 @@ function AnnotationEditor({ id }: { id: number }) {
                 : exceptionLocked ? "对组异常已确认 · 无需标注"
                 : `${image.quality_pending ? "待质检或仲裁" : STATUS_LABEL[image.status] || image.status} · 只读`}</strong>
               {canEdit && <span>提交后只读，审核退回后可修改。</span>}
+              {!canEdit && !!detail.data?.peer_annotators?.length && (
+                <span>先提交的标注员：{detail.data.peer_annotators.join("、")}</span>
+              )}
             </div>
           } />
           {image.kind === "exception" && (
@@ -572,32 +558,6 @@ function AnnotationEditor({ id }: { id: number }) {
       />
 
       <ExampleDrawer open={exampleOpen} onClose={() => setExampleOpen(false)} />
-
-      <Modal
-        open={canEdit && differences.length > 0}
-        title="组间等级差异"
-        width={760}
-        onCancel={() => setDifferences([])}
-        footer={<Button type="primary" onClick={() => setDifferences([])}>返回修改</Button>}
-      >
-        <Table<GradeDifference>
-          size="small"
-          pagination={false}
-          rowKey={(row) => `${row.peer_group}:${row.dimension}`}
-          dataSource={differences}
-          scroll={{ x: 520 }}
-          columns={[
-            { title: "维度", dataIndex: "label", width: 130 },
-            { title: "我的等级和评语", render: (_, row) => <><Tag>{row.own_grade}</Tag>{row.own_comment || "—"}</> },
-            { title: "对方的等级和评语", render: (_, row) => (
-              <><Tag>{row.peer_grade}</Tag>{row.peer_comment || "—"}
-                {row.peer_group && <div><Typography.Text type="secondary">{row.peer_group}</Typography.Text></div>}
-              </>
-            ) },
-            { title: "档差", width: 100, render: (_, row) => `相差 ${row.gap} 档` },
-          ]}
-        />
-      </Modal>
 
       <Modal
         open={canEdit && !!kindConflict}

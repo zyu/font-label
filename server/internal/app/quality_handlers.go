@@ -79,6 +79,35 @@ func (s *Server) handleSetQualityPolicy(c *gin.Context) {
 // Allocation uses the source sample's rank, independent of review timing.
 const activeQualityUsersSQL = `SELECT array_agg(id ORDER BY id) AS ids FROM users WHERE role='quality' AND status='active'`
 
+func (s *Server) enqueueQuality(c *gin.Context, tx pgx.Tx, imageID int64, version int, reviewID int64, action string) error {
+	ctx := c.Request.Context()
+	var gradeDispute bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM annotation_versions WHERE image_id=$1 AND version=$2 AND payload ? 'grade_differences'
+	)`, imageID, version).Scan(&gradeDispute); err != nil {
+		return err
+	}
+	if !gradeDispute {
+		return s.enqueueQualitySample(c, tx, imageID, reviewID, action)
+	}
+
+	// Reuse the review-linked sample for arbitration without assigning an inspection.
+	var sampleID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO quality_samples (review_id,image_id,sample_order)
+		VALUES ($1,$2,1) RETURNING id`, reviewID, imageID).Scan(&sampleID); err != nil {
+		return err
+	}
+	disputeID, arbiterID, err := registerDispute(ctx, tx, sampleID)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE images SET quality_pending=true WHERE id=$1`, imageID); err != nil {
+		return err
+	}
+	return s.insertAudit(c, tx, "quality.dispute", "quality_dispute", disputeID,
+		map[string]any{"image_id": imageID, "review_id": reviewID, "arbiter_id": arbiterID, "reason": "grade_difference"})
+}
+
 func (s *Server) enqueueQualitySample(c *gin.Context, tx pgx.Tx, imageID, reviewID int64, action string) error {
 	ctx := c.Request.Context()
 	var number, rate, revision, groupID, folderID int64
@@ -127,6 +156,7 @@ func assignUnclaimedSamples(ctx context.Context, tx pgx.Tx) error {
 	_, err := tx.Exec(ctx, `UPDATE quality_samples q SET inspector_id=ids[1+((q.sample_order-1) % cardinality(ids))]
 		FROM (`+activeQualityUsersSQL+`) active
 		WHERE q.inspector_id IS NULL AND q.result IS NULL AND cardinality(ids)>0
+		  AND NOT EXISTS (SELECT 1 FROM quality_disputes d WHERE d.sample_id=q.id)
 		  AND EXISTS (SELECT 1 FROM reviews r JOIN images i ON i.id=r.image_id
 		              WHERE r.id=q.review_id AND r.action='approve' AND r.annotation_version>i.voided_through_version)`)
 	if err != nil {
@@ -147,6 +177,8 @@ const qualityFrom = ` FROM quality_samples q
 	LEFT JOIN annotation_versions v ON v.image_id=i.id AND v.version=r.annotation_version
 	LEFT JOIN users annotator ON annotator.id=v.annotator_id`
 
+const qualityInspectionSQL = `(d.id IS NULL OR q.result IS NOT NULL)`
+
 func (s *Server) handleListQualitySamples(c *gin.Context) { s.listQuality(c, false) }
 func (s *Server) handleListDisputes(c *gin.Context)       { s.listQuality(c, true) }
 
@@ -155,7 +187,7 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 	me := auth.MustCurrent(c)
 	page, size := httpx.Paging(c)
 	owner, result, order := "q.inspector_id", "q.result", "q.id"
-	clause := " WHERE true"
+	clause := " WHERE " + qualityInspectionSQL
 	if disputes {
 		clause = " WHERE d.id IS NOT NULL"
 		owner, result, order = "d.arbiter_id", "d.result", "d.id"
@@ -185,9 +217,10 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 		SELECT q.id,i.id,i.sample_no,i.stored_name,COALESCE(g.name,''), r.action, r.comment,r.annotation_version,
 		       COALESCE(q.result,''),q.note,COALESCE(inspector.display_name,''),q.finished_at,
 		       COALESCE(d.id,0),COALESCE(arbiter.display_name,''),COALESCE(d.result,''),COALESCE(d.note,''),
-		       d.created_at,d.finished_at,COALESCE(v.payload,'{}'),r.grade_patch,
+		       d.created_at,d.finished_at,COALESCE(v.payload-'grade_differences','{}'),r.grade_patch,
 		       COALESCE(d.arbiter_id=q.inspector_id,false), (d.id IS NOT NULL AND d.arbiter_id IS NULL),
-		       COALESCE(reviewer.display_name,''),COALESCE(annotator.display_name,'')`+qualityFrom+clause+
+		       COALESCE(reviewer.display_name,''),COALESCE(annotator.display_name,''),
+		       v.payload->'grade_differences'`+qualityFrom+clause+
 		" ORDER BY "+order+" LIMIT $"+itoa(len(args)-1)+" OFFSET $"+itoa(len(args)), args...)
 	if err != nil {
 		httpx.Fail(c, err)
@@ -202,13 +235,14 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 		var selfArbitrated, awaitingArbiter bool
 		var annotation, patch any
 		var checkedAt, registeredAt, resolvedAt any
+		var differences []gradeDifference
 		if err := rows.Scan(&sampleID, &imageID, &number, &name, &group, &review, &reviewNote, &version,
 			&qc, &qcNote, &inspector, &checkedAt, &disputeID, &arbiter, &ruling, &rulingNote,
-			&registeredAt, &resolvedAt, &annotation, &patch, &selfArbitrated, &awaitingArbiter, &reviewer, &annotator); err != nil {
+			&registeredAt, &resolvedAt, &annotation, &patch, &selfArbitrated, &awaitingArbiter, &reviewer, &annotator, &differences); err != nil {
 			httpx.Fail(c, err)
 			return
 		}
-		items = append(items, gin.H{
+		item := gin.H{
 			"id": sampleID, "image_id": imageID, "sample_id": fmt.Sprintf("P%06d", number),
 			"image": name, "group": group, "original_url": s.signURL(imageID, "original"),
 			"review": review, "review_note": reviewNote, "version": version, "annotation": annotation,
@@ -217,7 +251,11 @@ func (s *Server) listQuality(c *gin.Context, disputes bool) {
 			"dispute_id": disputeID, "arbiter": arbiter, "ruling": ruling, "ruling_note": rulingNote,
 			"self_arbitrated": selfArbitrated, "awaiting_arbiter": awaitingArbiter,
 			"registered_at": registeredAt, "resolved_at": resolvedAt,
-		})
+		}
+		if len(differences) > 0 {
+			item["grade_differences"] = differences
+		}
+		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		httpx.Fail(c, err)
@@ -266,7 +304,7 @@ func (s *Server) decideQuality(c *gin.Context, dispute bool) {
 		}
 		var previous string
 		query := `SELECT q.image_id,q.id,COALESCE(q.inspector_id,0),COALESCE(q.result,'')` +
-			qualityFrom + ` WHERE q.id=$1 FOR UPDATE OF i`
+			qualityFrom + ` WHERE q.id=$1 AND ` + qualityInspectionSQL + ` FOR UPDATE OF i`
 		if dispute {
 			query = `SELECT q.image_id,q.id,COALESCE(d.arbiter_id,0),COALESCE(d.result,'')` +
 				qualityFrom + ` WHERE d.id=$1 AND d.arbiter_id IS DISTINCT FROM q.inspector_id FOR UPDATE OF i`

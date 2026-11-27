@@ -15,7 +15,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("从登记表按仲裁编号提交结论", async () => {
+it.each(["质检不合格", "组间等级差异"])("从登记表处理%s并按仲裁编号提交结论", async (cause) => {
+  const gradeDispute = cause === "组间等级差异";
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   const computed = window.getComputedStyle.bind(window);
   vi.spyOn(window, "getComputedStyle").mockImplementation((element) => computed(element));
@@ -28,8 +29,12 @@ it("从登记表按仲裁编号提交结论", async () => {
       total: 1,
       items: [{
         id: 12, dispute_id: 47, image_id: 22, sample_id: "P000020", image: "sample.png", group: "甲组",
-        annotation: { kind: "exception" }, review: "approve", reviewer: "审核员", version: 1,
-        quality_result: "fail", inspector: "质检员", arbiter: "仲裁员", ruling: "",
+        annotation: { kind: gradeDispute ? "score" : "exception" }, review: "approve", reviewer: "审核员", version: 1,
+        quality_result: gradeDispute ? "" : "fail", inspector: gradeDispute ? "" : "质检员", arbiter: "仲裁员", ruling: "",
+        grade_differences: gradeDispute ? [{
+          dimension: "white", label: "白平衡", own_grade: "S", peer_grade: "B", gap: 2,
+          own_comment: "本组评语", peer_comment: "对组评语", peer_group: "乙组", peer_annotator: "王老师",
+        }] : undefined,
       }],
     };
   });
@@ -39,6 +44,11 @@ it("从登记表按仲裁编号提交结论", async () => {
   expect(screen.queryByText("抽检规则")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("tab", { name: "争议仲裁登记" }));
   fireEvent.click(await screen.findByRole("button", { name: /P000020/ }));
+  if (gradeDispute) {
+    expect(await screen.findByText("乙组 · 王老师")).toBeVisible();
+    expect(screen.getByText("相差 2 档")).toBeVisible();
+    expect(screen.getByText("对组评语")).toBeVisible();
+  }
   fireEvent.change(screen.getByRole("textbox", { name: "处理备注" }), { target: { value: "按原图退回" } });
   fireEvent.click(screen.getByRole("button", { name: /^退\s*回$/ }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/quality/disputes/47", { result: "return", note: "按原图退回" }));

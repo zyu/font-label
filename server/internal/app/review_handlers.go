@@ -345,7 +345,7 @@ func (s *Server) handleReview(c *gin.Context) {
 			}
 		}
 		if groupID != 0 && in.Action == "approve" {
-			if err := s.enqueueQualitySample(c, tx, id, reviewID, in.Action); err != nil {
+			if err := s.enqueueQuality(c, tx, id, version, reviewID, in.Action); err != nil {
 				return err
 			}
 		}

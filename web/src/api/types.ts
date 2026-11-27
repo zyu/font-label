@@ -109,6 +109,7 @@ export interface ImageDetail {
   reviews: Review[];
   draft: Draft | null;
   grade_changes?: Record<string, { from: Level; to: Level }>;
+  peer_annotators?: string[];
 }
 
 export interface Draft {

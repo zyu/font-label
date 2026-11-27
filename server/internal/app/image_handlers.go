@@ -132,6 +132,7 @@ func (s *Server) handleGetImage(c *gin.Context) {
 	}
 	reviews := []ReviewDTO{}
 	changes := map[string]gradeChange{}
+	var differences []gradeDifference
 	if reviewVersion > 0 {
 		reviews, err = reviewsOf(ctx, tx, reviewImageID, reviewVersion)
 		if err != nil {
@@ -140,7 +141,8 @@ func (s *Server) handleGetImage(c *gin.Context) {
 		}
 		if row.ExceptionLockID == 0 && dto.Kind == "score" {
 			var submitted map[string]string
-			err := tx.QueryRow(ctx, `SELECT payload->'grades' FROM annotation_versions WHERE image_id=$1 AND version=$2`, id, reviewVersion).Scan(&submitted)
+			err := tx.QueryRow(ctx, `SELECT payload->'grades', payload->'grade_differences'
+				FROM annotation_versions WHERE image_id=$1 AND version=$2`, id, reviewVersion).Scan(&submitted, &differences)
 			if err != nil && err != pgx.ErrNoRows {
 				httpx.Fail(c, err)
 				return
@@ -152,12 +154,16 @@ func (s *Server) handleGetImage(c *gin.Context) {
 			}
 		}
 	}
-	httpx.OK(c, gin.H{
+	response := gin.H{
 		"image":         dto,
 		"reviews":       reviews,
 		"draft":         draft,
 		"grade_changes": changes,
-	})
+	}
+	if auth.MustCurrent(c).Role == "annotator" {
+		withPeerAnnotators(response, differences)
+	}
+	httpx.OK(c, response)
 }
 
 type gradeChange struct {
@@ -294,7 +300,7 @@ func (s *Server) handleHistory(c *gin.Context) {
 		return
 	}
 	rows, err := s.pool().Query(ctx,
-		`SELECT v.version, COALESCE(u.display_name,''), v.payload::text, v.submitted_at
+		`SELECT v.version, COALESCE(u.display_name,''), (v.payload-'grade_differences')::text, v.submitted_at
 		   FROM annotation_versions v
 		   JOIN images i ON i.id=v.image_id AND v.version>i.voided_through_version
 		   LEFT JOIN users u ON u.id = v.annotator_id

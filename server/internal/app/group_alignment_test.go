@@ -74,17 +74,45 @@ func TestGroupAlignment(t *testing.T) {
 	approve := map[string]any{"action": "approve", "comment": "已核对提交内容"}
 	exception := map[string]any{"kind": "exception", "exception_reasons": []string{"blurry"}, "exception_note": "对方的照片异常备注", "duration_ms": 5000}
 	x, y, _ := newPair()
+	request(admin, "PUT", "/quality-policy", map[string]int{"sample_rate_bps": 0}, 200)
 	request(first, "POST", x+"/submit", alignmentScore(20, 10, "第一组的白平衡标注评语"), 200)
 	// The totals are equal, but two dimensions disagree by two grades.
+	scoreWithGap := alignmentScore(10, 20, "第二组的白平衡标注评语")
+	scoreWithGap["client_submit_id"] = "8f14e45f-ea4b-4c1e-9a63-2b0f0a1c7d34"
 	for range 2 {
-		res := request(second, "POST", y+"/submit", alignmentScore(10, 20, "第二组的白平衡标注评语"), 409)
-		for _, field := range []string{`"GRADE_MISMATCH"`, `"white"`, `"black"`, `"own_grade":"B"`, `"peer_grade":"S"`, `"gap":2`, "第一组的白平衡标注评语", "第二组的白平衡标注评语"} {
-			if !strings.Contains(res.Body.String(), field) {
-				t.Fatalf("missing %q in %s", field, res.Body)
-			}
+		res := request(second, "POST", y+"/submit", scoreWithGap, 200)
+		if body := res.Body.String(); !strings.Contains(body, `"peer_annotators":["alignment-a"]`) ||
+			strings.Contains(body, "第一组的白平衡标注评语") {
+			t.Fatalf("unexpected submit result: %s", body)
 		}
 	}
-	request(second, "POST", y+"/submit", alignmentScore(20, 15, "第二组的白平衡标注评语"), 200)
+	detail := request(second, "GET", y, nil, 200).Body.String()
+	if !strings.Contains(detail, `"white":"B"`) || !strings.Contains(detail, `"peer_annotators":["alignment-a"]`) ||
+		strings.Contains(detail, "第一组的白平衡标注评语") {
+		t.Fatalf("submission did not preserve the second annotator's grades and disclose only the peer name: %s", detail)
+	}
+	history := request(second, "GET", y+"/history", nil, 200).Body.String()
+	if strings.Contains(history, "第一组的白平衡标注评语") {
+		t.Fatalf("peer comments appeared in annotator history: %s", history)
+	}
+	request(secondReview, "POST", y+"/review", approve, 200)
+	disputes := request(quality, "GET", "/quality/disputes", nil, 200).Body.String()
+	for _, field := range []string{`"total":1`, `"own_grade":"B"`, `"peer_grade":"S"`, `"gap":2`, "alignment-a", "第一组的白平衡标注评语"} {
+		if !strings.Contains(disputes, field) {
+			t.Fatalf("automatic dispute missing %q: %s", field, disputes)
+		}
+	}
+	var gradeSampleID, gradeDisputeID int64
+	if err := s.pool().QueryRow(ctx, `SELECT q.id, d.id FROM quality_disputes d JOIN quality_samples q ON q.id=d.sample_id`).
+		Scan(&gradeSampleID, &gradeDisputeID); err != nil {
+		t.Fatal(err)
+	}
+	request(quality, "POST", fmt.Sprintf("/quality/samples/%d", gradeSampleID), map[string]string{"result": "pass"}, 404)
+	request(quality, "POST", fmt.Sprintf("/quality/disputes/%d", gradeDisputeID), map[string]string{"result": "return"}, 200)
+	withinOneGrade := request(second, "POST", y+"/submit", alignmentScore(20, 15, "第二组的白平衡标注评语"), 200)
+	if strings.Contains(withinOneGrade.Body.String(), `"peer_annotators"`) {
+		t.Fatalf("a one-grade difference triggered a dispute: %s", withinOneGrade.Body)
+	}
 
 	x, y, exceptionID := newPair()
 	request(admin, "PUT", "/quality-policy", map[string]int{"sample_rate_bps": 0}, 200)
@@ -194,7 +222,11 @@ func TestGroupAlignment(t *testing.T) {
 	}
 	close(start)
 	code1, code2 := <-results, <-results
-	if min(code1, code2) != 200 || max(code1, code2) != 409 {
+	if code1 != 200 || code2 != 200 {
 		t.Fatalf("simultaneous conflicting submissions: %d, %d", code1, code2)
+	}
+	firstDetail, secondDetail := request(first, "GET", x, nil, 200).Body.String(), request(second, "GET", y, nil, 200).Body.String()
+	if firstSeesPeer, secondSeesPeer := strings.Contains(firstDetail, `"peer_annotators":["alignment-b"]`), strings.Contains(secondDetail, `"peer_annotators":["alignment-a"]`); firstSeesPeer == secondSeesPeer {
+		t.Fatalf("only the later submitter should see the earlier one: %s / %s", firstDetail, secondDetail)
 	}
 }
